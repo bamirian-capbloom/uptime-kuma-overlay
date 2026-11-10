@@ -1,0 +1,983 @@
+diff --git a/db/knex_migrations/2026-11-06-0000-dependency-notification-state.js b/db/knex_migrations/2026-11-06-0000-dependency-notification-state.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..8b9272f53657c172ce714eec7891ee0a413ae286
+--- /dev/null
++++ b/db/knex_migrations/2026-11-06-0000-dependency-notification-state.js
+@@ -0,0 +1,12 @@
++exports.up = function (knex) {
++    return knex.schema.createTable("monitor_notification_state", (table) => {
++        table.integer("monitor_id").unsigned().primary().references("id").inTable("monitor").onDelete("CASCADE");
++        table.integer("status").nullable();
++        table.boolean("incident_open").notNullable().defaultTo(false);
++        table.boolean("deferred").notNullable().defaultTo(false);
++    });
++};
++
++exports.down = function (knex) {
++    return knex.schema.dropTable("monitor_notification_state");
++};
+diff --git a/docs/dependency-notifications.md b/docs/dependency-notifications.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..de27424db7ffc5c1e1a71babe02c34c8c2f6b34b
+--- /dev/null
++++ b/docs/dependency-notifications.md
+@@ -0,0 +1,67 @@
++# Dependency notification suppression (Step 3)
++
++A monitor has one direct dependency (`dependency_monitor_id`); the full ancestor
++chain is evaluated. Checks, retries, heartbeat UP/DOWN/PENDING/MAINTENANCE values,
++heartbeat importance, uptime calculations, status pages and metrics keep their
++existing meaning. Only ordinary status notifications and their repeats are gated. Both scheduled
++checks and incoming push API heartbeats use the same notification state machine.
++Certificate and domain expiry notifications are unchanged.
++
++## Decisions
++
++- Any active ancestor whose latest observed status is DOWN blocks downstream DOWN
++  notifications, even when an intermediate ancestor is unknown or paused.
++- An active unknown or PENDING ancestor defers a new DOWN alert until its state is
++  conclusive. This can defer indefinitely if that ancestor never checks. Unknown
++  is not presented as confirmed-down suppression.
++- A paused ancestor's own stored DOWN is ignored. Traversal continues through it.
++  MAINTENANCE is not treated as DOWN; its ancestors are still evaluated.
++- An incident first observed during suppression stays silent on recovery. If its
++  dependencies become available while it is still down, the next child check
++  sends one DOWN, even with repeat notifications disabled. Later repeats use the
++  existing resend interval.
++- An incident already announced before a parent outage retains its recovery
++  notification. Its repeats are blocked during the outage. Existing maintenance
++  transition notification rules still apply.
++- Removing a dependency releases deferred notifications on the next child check.
++
++`monitor_notification_state` separately persists the latest observed check state,
++whether an incident was announced, and whether delivery is deferred. Existing
++incidents are conservatively treated as previously announced if the prior
++heartbeat was DOWN when this state is first created. State is removed when the
++monitor is deleted. This migration does not change heartbeat history or monitor
++configuration columns.
++
++Live dashboard heartbeat events add `dependencyNotification` with `suppressed`,
++`reason`, `suppressedByMonitorId` (when blocked by DOWN), `waitingForMonitorId`
++(when waiting), `incidentOpen` and `deferred`. This is derived metadata for a later
++UI stage, not a replacement for heartbeat status. Historical heartbeat records
++and legacy monitor configuration APIs keep their existing shape. The exported
++`dependencyMetadata()` resolver can recompute dependency metadata after restart.
++
++## Ordering and delivery limits
++
++Notification decisions are serialized per monitor in this server process.
++New observations are persisted before consulting ancestors or sending notifications; descendants
++can use them before the corresponding heartbeat history write completes.
++Unknown and retrying parents defer child alerts regardless of check order.
++Concurrent push requests carrying the same stale transition are deduplicated.
++An UP following an announced DOWN uses the serialized incident state even when
++its push request read stale heartbeat history. This also preserves recovery when
++the initial DOWN push is still delivering and neither request has stored a beat.
++A parent last confirmed UP cannot predict a future failure: a child can alert
++before that parent's next check detects DOWN. No fixed grace period is imposed.
++Parent recovery releases the child on its next scheduled check, not immediately.
++
++The incident records survive restarts; the latest persisted DOWN remains a
++confirmed observation until a new parent check supersedes it. Serialization is
++process-local, consistent with the existing single-server monitor scheduler.
++Slow notification providers delay subsequent decisions for that monitor, without
++blocking other monitors' checks or notification decisions.
++
++Delivery retains the existing notification-provider behavior: provider failures
++are logged by `Monitor.sendNotification`, which does not report per-provider
++success. Incident state therefore tracks notification attempts, not guaranteed
++receipt or individual recipient state. As with existing alerts, a process crash
++between external delivery and the state write can duplicate an alert. Exactly-once
++external delivery is not promised. No UI controls or status redesign is included.
+diff --git a/server/dependency-notification.js b/server/dependency-notification.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..8092da4530b1bcee3dc3faab9b382cb0782b25a5
+--- /dev/null
++++ b/server/dependency-notification.js
+@@ -0,0 +1,137 @@
++const { R } = require("redbean-node");
++const { UP, DOWN, PENDING, MAINTENANCE } = require("../src/util");
++
++const pending = new Map();
++
++/**
++ * Resolve the whole chain. Paused and maintenance ancestors do not block alerts,
++ * but their own ancestors still can. Unknown/retrying ancestors defer a new
++ * incident until a conclusive check; they are not reported as confirmed DOWN.
++ * @param {object} monitor Monitor being checked
++ * @returns {Promise<object>} Derived notification metadata
++ */
++async function dependencyMetadata(monitor) {
++    let id = monitor.dependency_monitor_id;
++    const visited = new Set([Number(monitor.id)]);
++    let waitingForMonitorId = null;
++    while (id) {
++        if (visited.has(Number(id))) {
++            return { suppressed: false, waitingForMonitorId: id, reason: "invalid-chain" };
++        }
++        visited.add(Number(id));
++        const parent = await R.knex("monitor").where({ id }).first();
++        if (!parent) {
++            break;
++        }
++        if (parent.active) {
++            const observed = await R.knex("monitor_notification_state").where({ monitor_id: id }).first();
++            const heartbeat =
++                observed || (await R.knex("heartbeat").where({ monitor_id: id }).orderBy("id", "desc").first());
++            if (heartbeat?.status === DOWN) {
++                return { suppressed: true, suppressedByMonitorId: id, reason: "ancestor-down" };
++            }
++            if (!heartbeat || heartbeat.status === PENDING || ![UP, DOWN, MAINTENANCE].includes(heartbeat.status)) {
++                waitingForMonitorId ??= id;
++            }
++        }
++        id = parent.dependency_monitor_id;
++    }
++    return { suppressed: false, waitingForMonitorId, reason: waitingForMonitorId ? "ancestor-unconfirmed" : null };
++}
++
++/**
++ * A monitor may be deleted while its check or notification is in flight. The
++ * foreign key prevents resurrection; do not fail a completed notification when
++ * deletion won that race. Other database failures must still propagate.
++ * @param {Function} db Knex connection
++ * @param {object} state Notification state
++ * @returns {Promise<boolean>} Whether the monitor still exists
++ */
++async function persistState(db, state) {
++    try {
++        await db("monitor_notification_state").insert(state).onConflict("monitor_id").merge();
++        return true;
++    } catch (error) {
++        if (!(await db("monitor").where({ id: state.monitor_id }).first())) {
++            return false;
++        }
++        throw error;
++    }
++}
++
++/**
++ * Serialize each monitor's notification decisions without blocking other checks.
++ * State is independent of heartbeat status/importance and survives restarts.
++ * Legacy incidents are initialized as open when their preceding beat was DOWN.
++ * @param {object} monitor Monitor being checked
++ * @param {object} beat Current heartbeat
++ * @param {object|null} previous Previous heartbeat
++ * @param {boolean} requested Legacy transition/repeat notification decision
++ * @param {Function} send Send the existing payload; receives true for an announced incident's recovery
++ * @returns {Promise<object>} Suppression metadata for future UI consumers
++ */
++function processDependencyNotification(monitor, beat, previous, requested, send) {
++    const key = Number(monitor.id);
++    const action = (pending.get(key) || Promise.resolve()).then(async () => {
++        const db = R.knex;
++        let state = await db("monitor_notification_state").where({ monitor_id: monitor.id }).first();
++        if (!state) {
++            state = { monitor_id: monitor.id, incident_open: previous?.status === DOWN, deferred: false };
++        }
++        const priorObservedStatus = state.status;
++        state.status = beat.status;
++        // Publish the check before consulting ancestors or awaiting providers.
++        // A slow notification must not hide a confirmed observation from children.
++        if (!(await persistState(db, state))) {
++            return { suppressed: false, reason: "monitor-deleted", incidentOpen: false, deferred: false };
++        }
++        const metadata = await dependencyMetadata(monitor);
++        let notify = requested;
++        if (beat.status === DOWN) {
++            const blocked = metadata.suppressed || metadata.waitingForMonitorId;
++            notify =
++                !blocked &&
++                (state.deferred ||
++                    (requested && (previous?.status === DOWN || priorObservedStatus !== DOWN || !state.incident_open)));
++            if (notify) {
++                state.deferred = true;
++                if (!(await persistState(db, state))) {
++                    return { suppressed: false, reason: "monitor-deleted", incidentOpen: false, deferred: false };
++                }
++                await send();
++                beat.downCount = 0;
++                state.incident_open = true;
++                state.deferred = false;
++            } else if (!state.incident_open) {
++                state.deferred = true;
++            }
++        } else if (beat.status === UP) {
++            // A suppressed incident must not produce an orphan recovery. An
++            // already announced incident still recovers even if a parent fails.
++            notify =
++                (state.incident_open && priorObservedStatus === DOWN) ||
++                (requested && (state.incident_open || (!state.deferred && priorObservedStatus !== UP)));
++            if (notify) {
++                await send(Boolean(state.incident_open));
++            }
++            state.incident_open = false;
++            state.deferred = false;
++        } else {
++            notify = false;
++        }
++        await persistState(db, state);
++        const currentMetadata =
++            beat.status === DOWN ? metadata : { suppressed: false, waitingForMonitorId: null, reason: null };
++        return { ...currentMetadata, incidentOpen: Boolean(state.incident_open), deferred: Boolean(state.deferred) };
++    });
++    const settled = action.catch(() => {});
++    pending.set(key, settled);
++    settled.then(() => {
++        if (pending.get(key) === settled) {
++            pending.delete(key);
++        }
++    });
++    return action;
++}
++
++module.exports = { processDependencyNotification, dependencyMetadata };
+diff --git a/server/model/monitor.js b/server/model/monitor.js
+index 728b8b061708aee44f7465ae5b9a2175fb40e9ba..a50f9ab7d15c8a8ae441051edfcf5696265bf5f2 100644
+--- a/server/model/monitor.js
++++ b/server/model/monitor.js
+@@ -65,6 +65,7 @@ const { promisify } = require("node:util");
+ const brotliCompress = promisify(zlib.brotliCompress);
+ const DomainExpiry = require("./domain_expiry");
+ const { monitorConfigSchema } = require("../types");
++const { processDependencyNotification } = require("../dependency-notification");
+ const { withMonitorDependencyLock } = require("../monitor-dependency");
+ 
+ const rootCertificates = rootCertificatesFingerprints();
+@@ -986,6 +987,8 @@ class Monitor extends BeanModel {
+             log.debug("monitor", `[${this.name}] Check isImportant`);
+             let isImportant = Monitor.isImportantBeat(isFirstBeat, previousBeat?.status, bean.status);
+ 
++            let notificationRequested = false;
++
+             // Mark as important if status changed, ignore pending pings,
+             // Don't notify if disrupted changes to up
+             if (isImportant) {
+@@ -993,7 +996,7 @@ class Monitor extends BeanModel {
+ 
+                 if (Monitor.isImportantForNotification(isFirstBeat, previousBeat?.status, bean.status)) {
+                     log.debug("monitor", `[${this.name}] sendNotification`);
+-                    await Monitor.sendNotification(isFirstBeat, this, bean);
++                    notificationRequested = true;
+                 } else {
+                     log.debug(
+                         "monitor",
+@@ -1020,7 +1023,7 @@ class Monitor extends BeanModel {
+                             "monitor",
+                             `[${this.name}] sendNotification again: Down Count: ${bean.downCount} | Resend Interval: ${this.resendInterval}`
+                         );
+-                        await Monitor.sendNotification(isFirstBeat, this, bean);
++                        notificationRequested = true;
+ 
+                         // Reset down count
+                         bean.downCount = 0;
+@@ -1028,6 +1031,14 @@ class Monitor extends BeanModel {
+                 }
+             }
+ 
++            this.dependencyNotification = await processDependencyNotification(
++                this,
++                bean,
++                previousBeat,
++                notificationRequested,
++                (isRecovery = false) => Monitor.sendNotification(isFirstBeat && !isRecovery, this, bean)
++            );
++
+             if (bean.status !== MAINTENANCE && Boolean(this.domainExpiryNotification)) {
+                 try {
+                     const supportInfo = await DomainExpiry.checkSupport(this);
+@@ -1082,7 +1093,7 @@ class Monitor extends BeanModel {
+ 
+             // Send to frontend
+             log.debug("monitor", `[${this.name}] Send to socket`);
+-            emitHeartbeat(io, bean.toJSON());
++            emitHeartbeat(io, { ...bean.toJSON(), dependencyNotification: this.dependencyNotification });
+             Monitor.sendStats(io, this.id);
+ 
+             // Store to database
+diff --git a/server/routers/api-router.js b/server/routers/api-router.js
+index 3d1882879d7e9f209e3cfc249549bb204bbc1c44..ffeff3642fa7eceea0a065607998ba46ec546a47 100644
+--- a/server/routers/api-router.js
++++ b/server/routers/api-router.js
+@@ -1,3 +1,4 @@
++const { processDependencyNotification } = require("../dependency-notification");
+ let express = require("express");
+ const { allowDevAllOrigin, allowAllOrigin, percentageToColor, filterAndJoin, sendHttpError } = require("../util");
+ const { R } = require("redbean-node");
+@@ -434,12 +435,13 @@ router.all("/api/push/:pushToken", async (request, response) => {
+ 
+         bean.important = Monitor.isImportantBeat(isFirstBeat, previousHeartbeat?.status, bean.status);
+ 
++        let notificationRequested = false;
+         if (Monitor.isImportantForNotification(isFirstBeat, previousHeartbeat?.status, bean.status)) {
+             // Reset down count
+             bean.downCount = 0;
+ 
+             log.debug("monitor", `[${monitor.name}] sendNotification`);
+-            await Monitor.sendNotification(isFirstBeat, monitor, bean);
++            notificationRequested = true;
+         } else {
+             if (bean.status === DOWN && monitor.resendInterval > 0) {
+                 ++bean.downCount;
+@@ -449,7 +451,7 @@ router.all("/api/push/:pushToken", async (request, response) => {
+                         "monitor",
+                         `[${monitor.name}] sendNotification again: Down Count: ${bean.downCount} | Resend Interval: ${monitor.resendInterval}`
+                     );
+-                    await Monitor.sendNotification(isFirstBeat, monitor, bean);
++                    notificationRequested = true;
+ 
+                     // Reset down count
+                     bean.downCount = 0;
+@@ -457,9 +459,16 @@ router.all("/api/push/:pushToken", async (request, response) => {
+             }
+         }
+ 
++        const dependencyNotification = await processDependencyNotification(
++            monitor,
++            bean,
++            previousHeartbeat,
++            notificationRequested,
++            (isRecovery = false) => Monitor.sendNotification(isFirstBeat && !isRecovery, monitor, bean)
++        );
+         await R.store(bean);
+ 
+-        emitHeartbeat(io, bean.toJSON());
++        emitHeartbeat(io, { ...bean.toJSON(), dependencyNotification });
+ 
+         Monitor.sendStats(io, monitor.id);
+ 
+diff --git a/test/backend-test/test-api.ts b/test/backend-test/test-api.ts
+index d70f6388744052e5459240818bf06a25e73d84c5..12188745096906bde9e8e2ba60e3e8b2109091be 100644
+--- a/test/backend-test/test-api.ts
++++ b/test/backend-test/test-api.ts
+@@ -231,6 +231,180 @@ test("API", async (t) => {
+         }
+     });
+ 
++    await t.test("push status notifications use dependency suppression and retain true heartbeats", async () => {
++        const { default: Monitor } = await import("../../server/model/monitor");
++        const { default: apiRouter } = await import("../../server/routers/api-router");
++        const parent = R.dispense("monitor");
++        Object.assign(parent, { name: "push-parent", type: "manual", interval: 60, active: 1 });
++        await R.store(parent);
++        const child = R.dispense("monitor");
++        Object.assign(child, {
++            name: "push-child",
++            type: "push",
++            interval: 60,
++            active: 1,
++            push_token: "dependency-push-test",
++            dependency_monitor_id: parent.id,
++            maxretries: 0,
++            resendInterval: 0,
++        });
++        await R.store(child);
++        await R.knex("monitor_notification_state").insert({ monitor_id: parent.id, status: 0 });
++        const originalSend = Monitor.sendNotification;
++        const originalStats = Monitor.sendStats;
++        const notifications: number[] = [];
++        Monitor.sendNotification = async (_first, _monitor, heartbeat) => {
++            notifications.push(heartbeat.status);
++        };
++        Monitor.sendStats = async () => {};
++        const app = express();
++        app.use(apiRouter);
++        const httpServer = app.listen(0, "127.0.0.1");
++        await new Promise((resolve) => httpServer.once("listening", resolve));
++        const baseUrl = `http://127.0.0.1:${(httpServer.address() as AddressInfo).port}`;
++        const push = async (status: string) => {
++            const response = await fetch(`${baseUrl}/api/push/dependency-push-test?status=${status}`);
++            assert.strictEqual(response.status, 200);
++            assert.deepStrictEqual(await response.json(), { ok: true });
++        };
++        try {
++            await push("down");
++            await push("down");
++            assert.deepStrictEqual(notifications, []);
++            assert.strictEqual((await Monitor.getPreviousHeartbeat(child.id)).status, 0);
++            await R.knex("monitor_notification_state").where({ monitor_id: parent.id }).update({ status: 1 });
++            await push("down");
++            await push("down");
++            await push("up");
++            assert.deepStrictEqual(notifications, [0, 1]);
++            await R.knex("monitor_notification_state").where({ monitor_id: parent.id }).update({ status: 0 });
++            await push("down");
++            await push("up");
++            assert.deepStrictEqual(notifications, [0, 1]);
++            assert.strictEqual((await Monitor.getPreviousHeartbeat(child.id)).status, 1);
++        } finally {
++            Monitor.sendNotification = originalSend;
++            Monitor.sendStats = originalStats;
++            await new Promise((resolve) => httpServer.close(resolve));
++            await R.trash(child);
++            await R.trash(parent);
++        }
++    });
++
++    for (const initialUp of [false, true]) {
++        await t.test(
++            `overlapping DOWN/UP pushes recover once with initialUp=${initialUp}`,
++            { timeout: 10000 },
++            async () => {
++                const { default: Monitor } = await import("../../server/model/monitor");
++                const { default: apiRouter } = await import("../../server/routers/api-router");
++                const monitor = R.dispense("monitor");
++                Object.assign(monitor, {
++                    name: "overlapping-push",
++                    type: "push",
++                    interval: 60,
++                    active: 1,
++                    push_token: "overlapping-push-test",
++                    maxretries: 0,
++                    resendInterval: 0,
++                });
++                await R.store(monitor);
++                const originalSend = Monitor.sendNotification;
++                const originalStats = Monitor.sendStats;
++                const originalPrevious = Monitor.getPreviousHeartbeat;
++                const originalStore = R.store;
++                const notifications: number[] = [];
++                let release: () => void;
++                let started: () => void;
++                let staleRead: () => void;
++                let releaseHistory: () => void;
++                const delivery = new Promise<void>((resolve) => {
++                    release = resolve;
++                });
++                const delivering = new Promise<void>((resolve) => {
++                    started = resolve;
++                });
++                const read = new Promise<void>((resolve) => {
++                    staleRead = resolve;
++                });
++                const history = new Promise<void>((resolve) => {
++                    releaseHistory = resolve;
++                });
++                let downInFlight = false;
++                Monitor.sendNotification = async (first, _monitor, heartbeat) => {
++                    // Keep the real provider entry point's initial-UP behavior.
++                    if (!first || heartbeat.status === 0) {
++                        notifications.push(heartbeat.status);
++                    }
++                    if (heartbeat.status === 0) {
++                        downInFlight = true;
++                        started();
++                        await delivery;
++                    }
++                };
++                Monitor.sendStats = async () => {};
++                Monitor.getPreviousHeartbeat = async (id) => {
++                    const previous = await originalPrevious.call(Monitor, id);
++                    if (Number(id) === Number(monitor.id) && downInFlight) {
++                        assert.strictEqual(previous?.status ?? null, initialUp ? 1 : null);
++                        staleRead();
++                    }
++                    return previous;
++                };
++                R.store = async (bean) => {
++                    const target = Number(bean.monitor_id) === Number(monitor.id) && downInFlight;
++                    if (target && bean.status === 0) {
++                        await history;
++                    }
++                    const id = await originalStore.call(R, bean);
++                    if (target && bean.status === 1) {
++                        releaseHistory();
++                    }
++                    return id;
++                };
++                const app = express();
++                app.use(apiRouter);
++                const httpServer = app.listen(0, "127.0.0.1");
++                await new Promise((resolve) => httpServer.once("listening", resolve));
++                const baseUrl = `http://127.0.0.1:${(httpServer.address() as AddressInfo).port}`;
++                const push = async (status: string) => {
++                    const response = await fetch(`${baseUrl}/api/push/overlapping-push-test?status=${status}`);
++                    assert.strictEqual(response.status, 200);
++                    assert.deepStrictEqual(await response.json(), { ok: true });
++                };
++                const requests: Promise<void>[] = [];
++                try {
++                    if (initialUp) {
++                        await push("up");
++                    }
++                    requests.push(push("down"));
++                    await delivering;
++                    requests.push(push("up"));
++                    await read;
++                    release();
++                    await Promise.all(requests);
++                    downInFlight = false;
++                    assert.strictEqual((await originalPrevious.call(Monitor, monitor.id)).status, 0);
++                    await push("up");
++                    assert.deepStrictEqual(notifications, [0, 1]);
++                    const state = await R.knex("monitor_notification_state").where({ monitor_id: monitor.id }).first();
++                    assert.strictEqual(state.status, 1);
++                    assert.strictEqual(Boolean(state.incident_open), false);
++                } finally {
++                    release();
++                    releaseHistory();
++                    await Promise.allSettled(requests);
++                    Monitor.sendNotification = originalSend;
++                    Monitor.sendStats = originalStats;
++                    Monitor.getPreviousHeartbeat = originalPrevious;
++                    R.store = originalStore;
++                    await new Promise((resolve) => httpServer.close(resolve));
++                    await R.trash(monitor);
++                }
++            }
++        );
++    }
++
+     await t.test("GET /api/openapi.json documents /api/info and /api/docs serves the UI", async () => {
+         const { default: apiRouter } = await import("../../server/routers/api-router");
+         const app = express();
+diff --git a/test/backend-test/test-dependency-notification.ts b/test/backend-test/test-dependency-notification.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..3e247d88e864db888ec4bf7620906f9f5c561b2a
+--- /dev/null
++++ b/test/backend-test/test-dependency-notification.ts
+@@ -0,0 +1,264 @@
++import { before, after, beforeEach, test } from "node:test";
++import assert from "node:assert/strict";
++import { createRequire } from "node:module";
++const require = createRequire(import.meta.url);
++const { R } = require("redbean-node");
++const { UP, DOWN, PENDING, MAINTENANCE } = require("../../src/util");
++const {
++    processDependencyNotification: processBeat,
++    dependencyMetadata,
++} = require("../../server/dependency-notification");
++const migration = require("../../db/knex_migrations/2026-11-06-0000-dependency-notification-state");
++const db = require("knex")({ client: "better-sqlite3", connection: { filename: ":memory:" }, useNullAsDefault: true });
++let sent: number[];
++let child: any;
++const beat = (monitor: any, status: number, previous: number | null = DOWN, requested = false) =>
++    processBeat(monitor, { status }, previous === null ? null : { status: previous }, requested, async () => {
++        sent.push(status);
++    });
++before(async () => {
++    R.setup(db);
++    await db.raw("PRAGMA foreign_keys = ON");
++    await db.schema.createTable("monitor", (t) => {
++        t.integer("id").primary();
++        t.integer("dependency_monitor_id");
++        t.boolean("active");
++    });
++    await db.schema.createTable("heartbeat", (t) => {
++        t.increments("id");
++        t.integer("monitor_id");
++        t.integer("status");
++    });
++    await migration.up(db);
++});
++after(async () => {
++    await migration.down(db);
++    await db.destroy();
++});
++beforeEach(async () => {
++    await db("monitor_notification_state").del();
++    await db("heartbeat").del();
++    await db("monitor").del();
++    await db("monitor").insert([
++        { id: 1, active: true, dependency_monitor_id: 2 },
++        { id: 2, active: true, dependency_monitor_id: 3 },
++        { id: 3, active: true },
++    ]);
++    child = { id: 1, dependency_monitor_id: 2 };
++    sent = [];
++});
++/**
++ * Record an ancestor heartbeat.
++ * @param status Observed status
++ * @param id Ancestor ID
++ * @returns Resolves after storing the observation
++ */
++async function parent(status: number, id = 3) {
++    await db("heartbeat").insert({ monitor_id: id, status });
++}
++test("transitive confirmed DOWN wins over unknown direct parent; beats remain DOWN", async () => {
++    await parent(DOWN);
++    const current = { status: DOWN };
++    const result = await processBeat(child, current, { status: UP }, true, async () => {
++        sent.push(DOWN);
++    });
++    assert.equal(result.suppressedByMonitorId, 3);
++    assert.equal(result.deferred, true);
++    assert.equal(current.status, DOWN);
++    assert.deepEqual(sent, []);
++});
++test("unknown and retrying ancestors defer until conclusive; paused ancestors do not block", async () => {
++    assert.equal((await beat(child, DOWN, UP, true)).reason, "ancestor-unconfirmed");
++    await parent(PENDING, 2);
++    await parent(UP);
++    assert.equal((await beat(child, DOWN)).waitingForMonitorId, 2);
++    await db("monitor").where({ id: 2 }).update({ active: false });
++    await beat(child, DOWN);
++    assert.deepEqual(sent, [DOWN]);
++});
++test("deferred incident sends once after parent recovery even with repeats disabled", async () => {
++    await parent(DOWN, 2);
++    await parent(UP);
++    await beat(child, DOWN, UP, true);
++    await beat(child, DOWN, DOWN, true);
++    await parent(UP, 2);
++    await beat(child, DOWN);
++    await beat(child, DOWN);
++    assert.deepEqual(sent, [DOWN]);
++    await beat(child, DOWN, DOWN, true);
++    assert.deepEqual(sent, [DOWN, DOWN]);
++    await beat(child, UP, DOWN, true);
++    assert.deepEqual(sent, [DOWN, DOWN, UP]);
++});
++test("silent incidents recover silently, including across maintenance and restart", async () => {
++    await parent(DOWN, 2);
++    await beat(child, DOWN, UP, true);
++    await beat(child, MAINTENANCE);
++    // Reload the module to discard process-local serialization state.
++    delete require.cache[require.resolve("../../server/dependency-notification")];
++    const reloaded = require("../../server/dependency-notification").processDependencyNotification;
++    await reloaded(child, { status: UP }, { status: MAINTENANCE }, false, async () => {
++        sent.push(UP);
++    });
++    assert.deepEqual(sent, []);
++});
++test("already alerted legacy incident recovers while parent is DOWN; repeats suppressed", async () => {
++    await parent(DOWN, 2);
++    await beat(child, DOWN, DOWN, true);
++    await beat(child, UP, DOWN, true);
++    assert.deepEqual(sent, [UP]);
++});
++test("concurrent duplicate decisions produce one deferred DOWN; observations override stale heartbeat", async () => {
++    await parent(DOWN, 2);
++    await parent(UP);
++    await beat(child, DOWN, UP, true);
++    await beat({ id: 2, dependency_monitor_id: 3 }, UP, DOWN, true);
++    sent = [];
++    await Promise.all([beat(child, DOWN), beat(child, DOWN)]);
++    assert.deepEqual(sent, [DOWN]);
++});
++test("maintenance ancestor is not DOWN; paused ancestor still traverses to failed grandparent", async () => {
++    await parent(MAINTENANCE, 2);
++    await parent(UP);
++    assert.equal((await dependencyMetadata(child)).reason, null);
++    await db("monitor").where({ id: 2 }).update({ active: false });
++    await parent(DOWN);
++    assert.equal((await dependencyMetadata(child)).suppressedByMonitorId, 3);
++});
++test("no dependency preserves ordinary transitions and repeats", async () => {
++    child.dependency_monitor_id = null;
++    await beat(child, UP, null, true);
++    await beat(child, DOWN, UP, true);
++    await beat(child, DOWN);
++    await beat(child, DOWN, DOWN, true);
++    await beat(child, UP, DOWN, true);
++    assert.deepEqual(sent, [UP, DOWN, DOWN, UP]);
++});
++test("failed send retries deferred incident without opening it", async () => {
++    await parent(DOWN, 2);
++    await parent(UP);
++    await beat(child, DOWN, UP, true);
++    await parent(UP, 2);
++    await assert.rejects(
++        processBeat(child, { status: DOWN }, { status: DOWN }, false, async () => {
++            throw Error("failed");
++        })
++    );
++    await beat(child, DOWN);
++    assert.deepEqual(sent, [DOWN]);
++});
++
++test("removing a dependency releases a deferred incident and silent recovery remains silent", async () => {
++    await parent(DOWN, 2);
++    await beat(child, DOWN, UP, true);
++    child.dependency_monitor_id = null;
++    await beat(child, DOWN);
++    await beat(child, DOWN);
++    assert.deepEqual(sent, [DOWN]);
++});
++test("paused parent ignores its stale DOWN observation", async () => {
++    await parent(DOWN, 2);
++    await parent(UP);
++    await db("monitor").where({ id: 2 }).update({ active: false });
++    await beat(child, DOWN, UP, true);
++    assert.deepEqual(sent, [DOWN]);
++});
++test("ordinary maintenance recovery does not create an extra notification", async () => {
++    child.dependency_monitor_id = null;
++    await beat(child, DOWN, UP, true);
++    await beat(child, MAINTENANCE, DOWN, false);
++    await beat(child, UP, MAINTENANCE, false);
++    assert.deepEqual(sent, [DOWN]);
++});
++test("first delivery failure is durable and retried without a new transition", async () => {
++    child.dependency_monitor_id = null;
++    await assert.rejects(
++        processBeat(child, { status: DOWN }, { status: UP }, true, async () => {
++            throw Error("failed");
++        })
++    );
++    await beat(child, DOWN);
++    assert.deepEqual(sent, [DOWN]);
++});
++test("notification state is deleted with its monitor", async () => {
++    await beat(child, DOWN, UP, true);
++    await db("monitor").where({ id: 1 }).del();
++    assert.equal(await db("monitor_notification_state").where({ monitor_id: 1 }).first(), undefined);
++});
++
++test("concurrent pushes with the same stale transition send one DOWN and one recovery", async () => {
++    child.dependency_monitor_id = null;
++    await Promise.all([beat(child, DOWN, UP, true), beat(child, DOWN, UP, true)]);
++    assert.deepEqual(sent, [DOWN]);
++    await Promise.all([beat(child, UP, DOWN, true), beat(child, UP, DOWN, true)]);
++    assert.deepEqual(sent, [DOWN, UP]);
++});
++
++test("released alert starts a fresh repeat interval", async () => {
++    await parent(DOWN, 2);
++    await parent(UP);
++    await beat(child, DOWN, UP, true);
++    await parent(UP, 2);
++    const current = { status: DOWN, downCount: 4 };
++    await processBeat(child, current, { status: DOWN }, false, async () => {
++        sent.push(DOWN);
++    });
++    assert.equal(current.downCount, 0);
++    assert.deepEqual(sent, [DOWN]);
++});
++
++test("slow parent delivery does not block child checks or hide confirmed DOWN", async () => {
++    await parent(UP);
++    let release: () => void;
++    let started: () => void;
++    const delivering = new Promise<void>((resolve) => {
++        started = resolve;
++    });
++    const delivery = new Promise<void>((resolve) => {
++        release = resolve;
++    });
++    const parentBeat = processBeat(
++        { id: 2, dependency_monitor_id: 3 },
++        { status: DOWN },
++        { status: UP },
++        true,
++        async () => {
++            started();
++            await delivery;
++        }
++    );
++    await delivering;
++    try {
++        const result = await beat(child, DOWN, UP, true);
++        assert.equal(result.suppressedByMonitorId, 2);
++        assert.deepEqual(sent, []);
++    } finally {
++        release();
++        await parentBeat;
++    }
++});
++
++test("deletion during delivery does not resurrect notification state or fail the check", async () => {
++    child.dependency_monitor_id = null;
++    await processBeat(child, { status: DOWN }, { status: UP }, true, async () => {
++        await db("monitor").where({ id: child.id }).del();
++    });
++    assert.equal(await db("monitor_notification_state").where({ monitor_id: child.id }).first(), undefined);
++});
++test("a deleted monitor cannot send or recreate state", async () => {
++    await db("monitor").where({ id: child.id }).del();
++    const result = await beat(child, DOWN, UP, true);
++    assert.equal(result.reason, "monitor-deleted");
++    assert.deepEqual(sent, []);
++});
++
++test("an announced incident recovers using serialized state despite a stale UP heartbeat", async () => {
++    child.dependency_monitor_id = null;
++    await beat(child, UP, null, true);
++    sent = [];
++    await beat(child, DOWN, UP, true);
++    await beat(child, UP, UP, false);
++    // A late DOWN history write must not cause a second recovery, either.
++    await beat(child, UP, DOWN, true);
++    assert.deepEqual(sent, [DOWN, UP]);
++});
+diff --git a/test/backend-test/test-monitor-beat.ts b/test/backend-test/test-monitor-beat.ts
+index 0b895f6a2e08394e2c90b69491b2a439c8a2bffd..599125c64366260e6aa99a712971ef3ab72af27d 100644
+--- a/test/backend-test/test-monitor-beat.ts
++++ b/test/backend-test/test-monitor-beat.ts
+@@ -1,4 +1,4 @@
+-import { afterEach, describe, test } from "node:test";
++import { before, after, beforeEach, afterEach, describe, test } from "node:test";
+ import assert from "node:assert";
+ import { createRequire } from "node:module";
+ import http from "node:http";
+@@ -11,6 +11,29 @@ const { UptimeCalculator } = require("../../server/uptime-calculator");
+ const { Prometheus } = require("../../server/prometheus");
+ import { socketRoom } from "../../server/heartbeat-emit";
+ 
++// Notification incident state is persisted independently from mocked heartbeats.
++const notificationDB = require("knex")({
++    client: "better-sqlite3",
++    connection: { filename: ":memory:" },
++    useNullAsDefault: true,
++});
++before(async () => {
++    R.setup(notificationDB);
++    await notificationDB.schema.createTable("monitor", (table) => {
++        table.integer("id").primary();
++        table.boolean("active");
++        table.integer("dependency_monitor_id");
++    });
++    await notificationDB("monitor").insert({ id: 9002 });
++    await require("../../db/knex_migrations/2026-11-06-0000-dependency-notification-state").up(notificationDB);
++});
++beforeEach(async () => {
++    await notificationDB("monitor_notification_state").del();
++});
++after(async () => {
++    await notificationDB.destroy();
++});
++
+ // Self-signed certificate for 127.0.0.1, tests only
+ const TEST_CERT = `-----BEGIN CERTIFICATE-----
+ MIIDGjCCAgKgAwIBAgIUBDEuoYxCxNILP6rHwaw2Opgn1nYwDQYJKoZIhvcNAQEL
+@@ -91,12 +114,13 @@ afterEach(() => {
+ });
+ 
+ /**
+- * Start an HTTP server that answers every request with 200 OK
++ * Start an HTTP server with a configurable response status
++ * @param {number} status HTTP response status
+  * @returns {Promise<{url: string, close: Function}>} Server URL and closer
+  */
+-async function localServer() {
++async function localServer(status = 200) {
+     const server = http.createServer((req, res) => {
+-        res.writeHead(200, { "Content-Type": "text/plain" });
++        res.writeHead(status, { "Content-Type": "text/plain" });
+         res.end("OK");
+     });
+     await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+@@ -234,57 +258,75 @@ describe("Monitor beat over HTTP", () => {
+         }
+     });
+ 
+-    test("checks, emits the heartbeat and updates prometheus", async () => {
+-        const server = await localServer();
+-        const monitor = fakeMonitor(server.url);
+-        const io = fakeIo();
++    for (const suppressed of [false, true]) {
++        test(`checks, emits and stores true status with suppression=${suppressed}`, async () => {
++            const server = await localServer(suppressed ? 503 : 200);
++            const monitor = fakeMonitor(server.url);
++            if (suppressed) {
++                monitor.dependency_monitor_id = 9003;
++                await notificationDB("monitor").insert({ id: 9003, active: true });
++                await notificationDB("monitor_notification_state").insert({ monitor_id: 9003, status: 0 });
++            }
++            const io = fakeIo();
+ 
+-        R.findOne = async () => null;
+-        R.dispense = () => ({
+-            monitor_id: monitor.id,
+-            toJSON() {
+-                return { monitor_id: this.monitor_id, status: this.status, msg: this.msg };
+-            },
+-        });
+-        R.store = async () => {};
+-        R.isoDateTimeMillis = () => "2024-01-01 00:00:00";
+-        UptimeCalculator.getUptimeCalculator = async () => ({
+-            update: async () => ({ unix: () => 1704067200 }),
+-        });
+-        Monitor.sendNotification = async () => {};
+-        Monitor.isUnderMaintenance = async () => false;
+-        const prometheusUpdates = [];
+-        let beatDone;
+-        const beatFinished = new Promise((resolve) => {
+-            beatDone = resolve;
+-        });
+-        Prometheus.prototype.update = (...args) => {
+-            prometheusUpdates.push(args);
+-            beatDone();
+-        };
+-        Prometheus.prototype.remove = () => {};
++            R.findOne = async () => null;
++            R.dispense = () => ({
++                monitor_id: monitor.id,
++                toJSON() {
++                    return { monitor_id: this.monitor_id, status: this.status, msg: this.msg };
++                },
++            });
++            const stored = [];
++            R.store = async (bean) => {
++                stored.push(bean.status);
++            };
++            R.isoDateTimeMillis = () => "2024-01-01 00:00:00";
++            UptimeCalculator.getUptimeCalculator = async () => ({
++                update: async () => ({ unix: () => 1704067200 }),
++            });
++            const notifications = [];
++            Monitor.sendNotification = async () => {
++                notifications.push(true);
++            };
++            Monitor.isUnderMaintenance = async () => false;
++            const prometheusUpdates = [];
++            let beatDone;
++            const beatFinished = new Promise((resolve) => {
++                beatDone = resolve;
++            });
++            Prometheus.prototype.update = (...args) => {
++                prometheusUpdates.push(args);
++                beatDone();
++            };
++            Prometheus.prototype.remove = () => {};
+ 
+-        Monitor.sendStats = async () => {};
++            Monitor.sendStats = async () => {};
+ 
+-        try {
+-            await monitor.start(io, 0);
+-            // Prometheus is updated after the heartbeat was emitted and stored
+-            await Promise.race([
+-                beatFinished,
+-                new Promise((_, reject) => setTimeout(() => reject(new Error("beat timeout")), 5000)),
+-            ]);
+-            await new Promise((resolve) => setImmediate(resolve));
++            try {
++                await monitor.start(io, 0);
++                // Prometheus is updated after the heartbeat was emitted and stored
++                await Promise.race([
++                    beatFinished,
++                    new Promise((_, reject) => setTimeout(() => reject(new Error("beat timeout")), 5000)),
++                ]);
++                await new Promise((resolve) => setImmediate(resolve));
+ 
+-            const heartbeat = io.events.find((event) => event.event === "heartbeat");
+-            assert.ok(heartbeat, "heartbeat emitted");
+-            assert.strictEqual(heartbeat.args[0].status, 1);
+-            assert.strictEqual(prometheusUpdates.length, 1, "prometheus updated once");
+-            assert.strictEqual(prometheusUpdates[0][0].status, heartbeat.args[0].status);
+-        } finally {
+-            monitor.stop();
+-            await server.close();
+-        }
+-    });
++                const heartbeat = io.events.find((event) => event.event === "heartbeat");
++                assert.ok(heartbeat, "heartbeat emitted");
++                assert.strictEqual(heartbeat.args[0].status, suppressed ? 0 : 1);
++                assert.deepStrictEqual(stored, [suppressed ? 0 : 1]);
++                assert.strictEqual(notifications.length, suppressed ? 0 : 1);
++                if (suppressed) {
++                    assert.strictEqual(heartbeat.args[0].dependencyNotification.suppressedByMonitorId, 9003);
++                }
++                assert.strictEqual(prometheusUpdates.length, 1, "prometheus updated once");
++                assert.strictEqual(prometheusUpdates[0][0].status, heartbeat.args[0].status);
++            } finally {
++                monitor.stop();
++                await server.close();
++            }
++        });
++    }
+ 
+     test("uses the proxy agents of an active proxy", async () => {
+         const server = await localServer();
