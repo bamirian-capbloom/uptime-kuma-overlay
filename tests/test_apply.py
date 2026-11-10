@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('overlay', Path(__file__).resolve().parents[1] / 'scripts/apply.py')
 overlay = importlib.util.module_from_spec(spec)
@@ -73,6 +74,84 @@ class ReplaySafety(unittest.TestCase):
         self.assertEqual((self.source / 'file.txt').read_text(), 'private uncommitted content\n')
         self.assertEqual(overlay.git(self.dest, 'status', '--porcelain'), '')
         self.assertEqual(overlay.git(self.dest, 'rev-parse', 'HEAD^{tree}'), self.manifest['reference']['tree'])
+
+    def source_snapshot(self):
+        return {str(path.relative_to(self.source)): path.read_bytes()
+                for path in self.source.rglob('*') if path.is_file()}
+
+    def test_inherited_repository_context_preserves_newer_clean_source(self):
+        self.run_git('reset', '--hard', 'HEAD')
+        (self.source / 'newer.txt').write_text('committed work after the pinned base\n')
+        self.run_git('add', '.')
+        self.run_git('commit', '-qm', 'later source revision')
+        before = self.source_snapshot()
+        with patch.dict(os.environ, {'GIT_DIR': str(self.source / '.git'),
+                                     'GIT_WORK_TREE': str(self.source),
+                                     'GIT_COMMON_DIR': str(self.source / '.git')}):
+            overlay.apply(str(self.source), self.dest)
+        self.assertEqual(self.source_snapshot(), before)
+        self.assertTrue((self.dest / '.git').is_dir())
+        self.assertEqual((self.dest / 'file.txt').read_text(), 'custom\n')
+        self.assertEqual(overlay.git(self.dest, 'status', '--porcelain'), '')
+
+    def test_inherited_external_index_cannot_affect_reference_verification(self):
+        external_index = self.root / 'caller-index'
+        external_index.write_bytes((self.source / '.git/index').read_bytes())
+        index_before = external_index.read_bytes()
+        source_before = self.source_snapshot()
+        # Exercise both the driver's private alternate index and deterministic commit.
+        self.manifest['intended'] = {'tree': self.manifest['reference']['tree'], 'correction_units': ['0001'],
+                                     'difference_from_reference': {'files': ['file.txt']}}
+        self.manifest['reference']['tree'] = self.manifest['upstream']['tree']
+        self.save()
+        with patch.dict(os.environ, {'GIT_INDEX_FILE': str(external_index)}):
+            overlay.apply(str(self.source), self.dest)
+        self.assertEqual(external_index.read_bytes(), index_before)
+        self.assertEqual(self.source_snapshot(), source_before)
+        self.assertEqual(overlay.git(self.dest, 'rev-parse', 'HEAD^{tree}'), self.manifest['intended']['tree'])
+
+    def test_inherited_config_and_object_store_overrides_are_ignored(self):
+        before = self.source_snapshot()
+        inherited = {'GIT_OBJECT_DIRECTORY': str(self.root / 'missing-objects'),
+                     'GIT_ALTERNATE_OBJECT_DIRECTORIES': str(self.root / 'missing-alternates'),
+                     'GIT_SHALLOW_FILE': str(self.root / 'missing-shallow'),
+                     'GIT_NAMESPACE': 'caller-namespace',
+                     'GIT_CONFIG_COUNT': '1', 'GIT_CONFIG_KEY_0': 'core.worktree',
+                     'GIT_CONFIG_VALUE_0': str(self.source),
+                     'GIT_CONFIG_PARAMETERS': f"'core.worktree={self.source}'"}
+        with patch.dict(os.environ, inherited):
+            overlay.apply(str(self.source), self.dest)
+        self.assertEqual(self.source_snapshot(), before)
+        self.assertEqual((self.dest / 'file.txt').read_text(), 'custom\n')
+
+    def test_failed_replay_preserves_inherited_source_and_index(self):
+        external_index = self.root / 'caller-index'
+        external_index.write_bytes((self.source / '.git/index').read_bytes())
+        index_before = external_index.read_bytes()
+        source_before = self.source_snapshot()
+        file = self.bundle / 'change.patch'
+        file.write_bytes(file.read_bytes().replace(b'-original', b'-does-not-match'))
+        self.module['patches'][0]['sha256'] = hashlib.sha256(file.read_bytes()).hexdigest()
+        self.save()
+        with patch.dict(os.environ, {'GIT_DIR': str(self.source / '.git'),
+                                     'GIT_WORK_TREE': str(self.source),
+                                     'GIT_INDEX_FILE': str(external_index)}):
+            self.assert_clean_failure()
+        self.assertEqual(external_index.read_bytes(), index_before)
+        self.assertEqual(self.source_snapshot(), source_before)
+
+    def test_git_environment_covers_local_variables_and_preserves_transport(self):
+        names = overlay.run_git('rev-parse', '--local-env-vars').splitlines()
+        inherited = dict.fromkeys(names, 'caller-context')
+        inherited.update({'GIT_CONFIG_KEY_0': 'core.worktree', 'GIT_CONFIG_VALUE_0': 'caller',
+                          'GIT_SSH_COMMAND': 'ssh -i caller-key', 'GIT_ASKPASS': 'caller-askpass',
+                          'GIT_SSL_CAINFO': 'caller-ca.pem'})
+        with patch.dict(os.environ, inherited):
+            clean = overlay.git_environment()
+        for name in names + ['GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0']:
+            self.assertNotIn(name, clean)
+        for name in ['GIT_SSH_COMMAND', 'GIT_ASKPASS', 'GIT_SSL_CAINFO']:
+            self.assertEqual(clean[name], inherited[name])
 
     def test_existing_destination_and_symlink_preserved(self):
         self.dest.symlink_to(self.source, target_is_directory=True)

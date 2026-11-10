@@ -12,12 +12,37 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def run(*args, cwd=None):
-    return subprocess.check_output(args, cwd=cwd, stderr=subprocess.STDOUT).decode().strip()
+# Repository-local variables reported by `git rev-parse --local-env-vars`, plus
+# namespace/discovery controls. Keep transport/authentication settings intact.
+GIT_REPOSITORY_ENV = frozenset({
+    'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_CONFIG', 'GIT_CONFIG_PARAMETERS',
+    'GIT_CONFIG_COUNT', 'GIT_OBJECT_DIRECTORY', 'GIT_DIR', 'GIT_WORK_TREE',
+    'GIT_IMPLICIT_WORK_TREE', 'GIT_GRAFT_FILE', 'GIT_INDEX_FILE',
+    'GIT_NO_REPLACE_OBJECTS', 'GIT_REPLACE_REF_BASE', 'GIT_PREFIX',
+    'GIT_SHALLOW_FILE', 'GIT_COMMON_DIR', 'GIT_NAMESPACE',
+    'GIT_CEILING_DIRECTORIES', 'GIT_DISCOVERY_ACROSS_FILESYSTEM',
+})
 
 
-def git(where, *args):
-    return run('git', '-c', 'core.autocrlf=false', '-c', 'core.hooksPath=/dev/null', '-C', str(where), *args)
+def git_environment(overrides=None):
+    """Ignore the caller's repository context; permit only our explicit overrides."""
+    env = {key: value for key, value in os.environ.items()
+           if key not in GIT_REPOSITORY_ENV
+           and not key.startswith(('GIT_CONFIG_KEY_', 'GIT_CONFIG_VALUE_'))}
+    if overrides:
+        env.update(overrides)
+    return env
+
+
+def run_git(*args, env_overrides=None):
+    return subprocess.check_output(
+        ['git', '-c', 'core.autocrlf=false', '-c', 'core.hooksPath=/dev/null', *args],
+        env=git_environment(env_overrides), stderr=subprocess.STDOUT,
+    ).decode().strip()
+
+
+def git(where, *args, env_overrides=None):
+    return run_git('-C', str(where), *args, env_overrides=env_overrides)
 
 
 def checked_file(name, checksum=None):
@@ -93,7 +118,7 @@ def apply(source, destination, selected=None):
     try:
         # Fetch only the pinned revision into an independent object store. This
         # also works with a local partial clone without copying unrelated history.
-        run('git', 'init', '--quiet', str(temporary))
+        run_git('init', '--quiet', str(temporary))
         base = manifest['upstream']['commit']
         git(temporary, 'fetch', '--depth=1', '--no-tags', '--', str(Path(source).resolve()) if Path(source).exists() else source, base)
         git(temporary, 'checkout', '--detach', base)
@@ -118,11 +143,9 @@ def apply(source, destination, selected=None):
             if len(correction_plan) != len(corrections) or not corrections:
                 raise ValueError('Invalid corrective unit ledger')
             alternate = temporary / '.git' / 'overlay-reference-index'
-            reference_env = dict(os.environ, GIT_INDEX_FILE=str(alternate))
 
             def reference_git(*args):
-                return subprocess.check_output(['git', '-C', str(temporary), *args],
-                                               env=reference_env, stderr=subprocess.STDOUT).decode().strip()
+                return git(temporary, *args, env_overrides={'GIT_INDEX_FILE': str(alternate)})
 
             reference_git('read-tree', intended['tree'])
             for correction in reversed(correction_plan):
@@ -136,11 +159,11 @@ def apply(source, destination, selected=None):
             if sorted(changed) != sorted(intended['difference_from_reference']['files']):
                 raise ValueError('Undocumented file divergence from original fork')
         # Preserve exact tree in a deterministic commit, without using the user's identity.
-        env = dict(os.environ, GIT_AUTHOR_NAME='Uptime Kuma Overlay', GIT_AUTHOR_EMAIL='overlay@localhost',
+        env = dict(GIT_AUTHOR_NAME='Uptime Kuma Overlay', GIT_AUTHOR_EMAIL='overlay@localhost',
                    GIT_COMMITTER_NAME='Uptime Kuma Overlay', GIT_COMMITTER_EMAIL='overlay@localhost',
                    GIT_AUTHOR_DATE='2000-01-01T00:00:00Z', GIT_COMMITTER_DATE='2000-01-01T00:00:00Z')
-        commit = subprocess.check_output(['git', '-C', str(temporary), 'commit-tree', plan[-1]['after_tree'],
-                                         '-p', base, '-m', 'Reproduce pinned Uptime Kuma overlay'], env=env).decode().strip()
+        commit = git(temporary, 'commit-tree', plan[-1]['after_tree'], '-p', base,
+                     '-m', 'Reproduce pinned Uptime Kuma overlay', env_overrides=env)
         git(temporary, 'reset', '--hard', commit)
         if git(temporary, 'status', '--porcelain', '--untracked-files=all'):
             raise ValueError('Replay produced a dirty tree')

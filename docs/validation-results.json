@@ -98,6 +98,18 @@
         "passed": 65,
         "failed": 0
       }
+    },
+    {
+      "name": "review fix: Git environment isolation",
+      "local_log": "/tmp/kuma-overlay-git-isolation-tests.log",
+      "log_sha256": "e7347b9e88a72de7bafc39f1559e7cc3c2b34e6b7bfe1a583614d1d67f8f96fb",
+      "result": {
+        "passed": 18,
+        "failed": 0,
+        "new_regression_tests": 5,
+        "pre_fix_regressions_reproduced": 2,
+        "both_output_trees_unchanged": true
+      }
     }
   ]
 }

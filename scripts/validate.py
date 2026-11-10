@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Fresh replay followed by real feature tests and build. Fail at the first failing check."""
 import argparse
-import os
 from pathlib import Path
 import subprocess
-from apply import apply
+from apply import apply, git, git_environment
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('source')
@@ -16,7 +15,7 @@ parser.add_argument('--install-browser', action='store_true', help='Install Chro
 parser.add_argument('--full', action='store_true', help='Full backend/container and browser suites plus lint')
 args = parser.parse_args()
 repo = apply(args.source, args.destination, args.features.split(',') if args.features else None)
-env = dict(os.environ, TEST_BACKEND='1', HEADLESS_E2E_TESTS='1')
+env = dict(git_environment(), TEST_BACKEND='1', HEADLESS_E2E_TESTS='1')
 env.pop('SKIP_TESTCONTAINER', None)
 
 
@@ -47,6 +46,6 @@ if args.full:
     browser_env = dict(env, SKIP_TESTCONTAINER='1')
     browser_env.pop('TEST_BACKEND', None)
     check('npm', 'run', 'test-e2e', '--', '--max-failures=0', env=browser_env)
-if subprocess.check_output(['git', 'status', '--porcelain', '--untracked-files=all'], cwd=repo).strip():
+if git(repo, 'status', '--porcelain', '--untracked-files=all'):
     raise ValueError('Tests/build modified the tracked tree or left unignored artifacts')
 print('PASS: exact replay, regression tests, production build' + (' and full suites' if args.full else ''))
