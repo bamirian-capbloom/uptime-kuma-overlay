@@ -11,7 +11,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   replay-test-build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -28,6 +28,23 @@ jobs:
         run: python3 -m unittest discover -s tests -v
       - name: Verify Docker availability
         run: docker info
+      - name: Check baseline MQTT container startup
+        run: |
+          docker run -d --name overlay-mqtt-preflight hivemq/hivemq-ce:2023.5
+          ready=0
+          for attempt in $(seq 1 60); do
+            if docker logs overlay-mqtt-preflight 2>&1 | grep -q 'Started HiveMQ in'; then
+              ready=1
+              break
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' overlay-mqtt-preflight)" != true ]; then
+              break
+            fi
+            sleep 2
+          done
+          docker logs overlay-mqtt-preflight
+          docker rm -f overlay-mqtt-preflight
+          test "$ready" = 1
       - name: Replay official pin, install lockfile, test and build
         run: >-
           python3 scripts/validate.py https://github.com/louislam/uptime-kuma.git

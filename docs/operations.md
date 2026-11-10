@@ -4,7 +4,7 @@
 
 1. Read validation.md and confirm the exact supported SHA. This baseline is a v3 beta snapshot; later upstream fixes are excluded deliberately.
 2. Back up the live database and configuration with the application stopped; verify restoration in a disposable environment. Replay into a new source directory, never the running service.
-3. Run integrity self-tests, fresh lockfile installation, feature regressions, full backend/container suite, lint, build and browser suite. Exercise parent/child DOWN, unknown/paused ancestors, deferred release, reconnect/history ordering, mobile RTL and recovery toast isolation. Record failures and skips; do not deploy on a partial pass.
+3. Run integrity self-tests, fresh lockfile installation, feature regressions, full backend/container suite, lint, build and browser suite. Hosted container validation uses Ubuntu 22.04, matching the pinned upstream backend runner; its HiveMQ startup preflight must pass. Exercise parent/child DOWN, unknown/paused ancestors, deferred release, reconnect/history ordering, mobile RTL and recovery toast isolation. Record failures and skips; do not deploy on a partial pass.
 4. Review the actual code and database changes manually before switching application artifacts. This tooling does not deploy, publish or perform database migrations against an installation.
 
 ## Upgrade the upstream pin
