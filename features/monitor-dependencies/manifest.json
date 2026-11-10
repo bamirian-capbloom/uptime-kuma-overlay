@@ -147,6 +147,23 @@
         "src/mixins/socket.js",
         "test/frontend-test/test-dependency-down-toasts.ts"
       ]
+    },
+    {
+      "id": "0006a-clone-payload-safety",
+      "file": "features/monitor-dependencies/patches/0006a-clone-payload-safety.patch",
+      "documentation": "features/monitor-dependencies/docs/0006a-clone-payload-safety.md",
+      "sha256": "2db5eff799a259eb745161bb48115110c72b3fc476d9ed13fccd6e3168f641e4",
+      "requires": [
+        "0006-browser-toast-suppression"
+      ],
+      "source_pr": null,
+      "provenance": "Overlay correction for clone failure found during full browser validation of merged fork PRs #1\u2013#7",
+      "before_tree": "1ec2f50c9572d2741c50429e1d929f6ad02bc1f2",
+      "after_tree": "65031de845330b4858e305f87e35a6fb51e0b3e8",
+      "files": [
+        "server/server.js",
+        "test/backend-test/test-monitor-dependency-socket.ts"
+      ]
     }
   ]
 }

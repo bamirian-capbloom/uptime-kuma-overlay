@@ -20,12 +20,26 @@
     {
       "id": "monitor-dependencies",
       "manifest": "features/monitor-dependencies/manifest.json",
-      "sha256": "7f2a85b967f6dc2597275756ba5e33f1db57bfcb6432a5944235620886aa6aac"
+      "sha256": "d85019020da4930dc744a380fc8b3f78d400ad2921fbd6bfe9028bc24fe1acbe"
     },
     {
       "id": "toast-lifecycle",
       "manifest": "features/toast-lifecycle/manifest.json",
-      "sha256": "a7abe0b1b195f340bc81faf2029d1917e769fbd3c9d2c796e4d81ffe07537976"
+      "sha256": "e0823cb50bfed28a60b51efeb0116bd15d782764405d10e8636bc2c57f47e26e"
     }
-  ]
+  ],
+  "intended": {
+    "tree": "e843c85f2cf45c151abb07fd27ae37fc9ea3d004",
+    "difference_from_reference": {
+      "reason": "Exclude derived dependencyActive dashboard fields from monitor add/import, fixing clone regression present in merged fork",
+      "files": [
+        "server/server.js",
+        "test/backend-test/test-monitor-dependency-socket.ts"
+      ],
+      "patch_unit": "0006a-clone-payload-safety"
+    },
+    "correction_units": [
+      "0006a-clone-payload-safety"
+    ]
+  }
 }

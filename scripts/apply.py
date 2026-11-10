@@ -77,8 +77,8 @@ def load_plan(selected=None):
         checked_file(patch['documentation'])
         ids.add(patch['id'])
         tree = patch['after_tree']
-    if set(selected) == set(manifest['default_features']) and tree != manifest['reference']['tree']:
-        raise ValueError('Default plan does not reproduce reference tree')
+    if set(selected) == set(manifest['default_features']) and tree != manifest.get('intended', manifest['reference'])['tree']:
+        raise ValueError('Default plan does not reproduce intended customized tree')
     return manifest, plan
 
 
@@ -108,6 +108,33 @@ def apply(source, destination, selected=None):
             git(temporary, 'apply', '--index', str(file))
             if git(temporary, 'write-tree') != patch['after_tree']:
                 raise ValueError(f"Unexpected output tree at {patch['id']}")
+        # Prove that the documented corrective delta is the ONLY change from
+        # the original fork, using an alternate index (never the output index).
+        intended = manifest.get('intended', manifest['reference'])
+        selection = manifest['default_features'] if selected is None else selected
+        if set(selection) == set(manifest['default_features']) and intended['tree'] != manifest['reference']['tree']:
+            corrections = intended['correction_units']
+            correction_plan = [p for p in plan if p['id'] in corrections]
+            if len(correction_plan) != len(corrections) or not corrections:
+                raise ValueError('Invalid corrective unit ledger')
+            alternate = temporary / '.git' / 'overlay-reference-index'
+            reference_env = dict(os.environ, GIT_INDEX_FILE=str(alternate))
+
+            def reference_git(*args):
+                return subprocess.check_output(['git', '-C', str(temporary), *args],
+                                               env=reference_env, stderr=subprocess.STDOUT).decode().strip()
+
+            reference_git('read-tree', intended['tree'])
+            for correction in reversed(correction_plan):
+                reference_git('apply', '--reverse', '--cached',
+                              str(checked_file(correction['file'], correction['sha256'])))
+            original_tree = reference_git('write-tree')
+            alternate.unlink()
+            if original_tree != manifest['reference']['tree']:
+                raise ValueError('Corrections do not reconstruct the original fork reference tree')
+            changed = git(temporary, 'diff', '--name-only', original_tree, intended['tree']).splitlines()
+            if sorted(changed) != sorted(intended['difference_from_reference']['files']):
+                raise ValueError('Undocumented file divergence from original fork')
         # Preserve exact tree in a deterministic commit, without using the user's identity.
         env = dict(os.environ, GIT_AUTHOR_NAME='Uptime Kuma Overlay', GIT_AUTHOR_EMAIL='overlay@localhost',
                    GIT_COMMITTER_NAME='Uptime Kuma Overlay', GIT_COMMITTER_EMAIL='overlay@localhost',

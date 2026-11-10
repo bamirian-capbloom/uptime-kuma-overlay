@@ -1,0 +1,29 @@
+diff --git a/server/server.js b/server/server.js
+index 2f36f48e911a67293793e0a6b0c8da11b151aa4c..7f87569fce1071634651d8adb5cc6f0f691e5679 100644
+--- a/server/server.js
++++ b/server/server.js
+@@ -476,6 +476,8 @@ app.use(function (req, res, next) {
+                  * Should clean up before saving to the database.
+                  */
+                 const frontendOnlyProperties = [
++                    "dependencyActive",
++                    "dependency_active",
+                     "humanReadableInterval",
+                     "globalpingdnsresolvetypeoptions",
+                     "responsecheck",
+diff --git a/test/backend-test/test-monitor-dependency-socket.ts b/test/backend-test/test-monitor-dependency-socket.ts
+index 3355d85653d6f33f389ebc3941e68bd4abee44bf..47f83b3616c7f51c99a8aa85bd08958ad2fcb541 100644
+--- a/test/backend-test/test-monitor-dependency-socket.ts
++++ b/test/backend-test/test-monitor-dependency-socket.ts
+@@ -146,6 +146,11 @@ test("Socket.IO monitor dependency lifecycle and independent health checks", { t
+         const edit = async (id, fields) => call(socket, "editMonitor", { ...(await get(id)), ...fields });
+         const root = await add(payload("Root"));
+         assert.equal((await get(root)).dependencyMonitorId, null);
++        // Derived dashboard activity must not become a database column on clone/import.
++        const cloned = await add(
++            payload("Clone metadata", { dependencyMonitorId: root, dependencyActive: true, dependency_active: true })
++        );
++        assert.equal((await get(cloned)).dependencyMonitorId, root);
+         const middle = await add(payload("Middle", { dependencyMonitorId: root }));
+         const leaf = await add(payload("Leaf", { dependencyMonitorId: middle }));
+         assert.equal((await get(leaf)).dependencyMonitorId, middle);

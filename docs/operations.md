@@ -11,7 +11,7 @@
 
 Fetch official upstream and the fork; record full SHAs and merge base. Audit both ranges for unrelated changes. Reconstruct a fresh target from the new official SHA and only intended features; inspect auth, Knex migrations, Monitor.beat/sendNotification, push handler, compact/full payloads, socket batching and Vue tooltip/toast contracts. New official fixes may supersede custom hunks. Keep a written inclusion/exclusion ledger.
 
-Regenerate each logical unit and documentation against its new predecessor. Update all source provenance, before/after trees, patch hashes, module hashes and root reference tree. Never keep an old reference-tree claim for a new base. Test all supported module combinations and fresh plus migrated SQLite/MariaDB databases. Compare the entire default target tree to the reviewed intended target. A patch applying cleanly is not sufficient compatibility evidence. Submit changes as a new draft PR, with new validation evidence; merge only after review.
+Regenerate each logical unit and documentation against its new predecessor. Update all source provenance, before/after trees, patch hashes, module hashes and root reference/intended trees. Never keep an old reference-tree claim for a new base. Test all supported module combinations and fresh plus migrated SQLite/MariaDB databases. Compare the entire default target tree to the reviewed intended target. A patch applying cleanly is not sufficient compatibility evidence. Submit changes as a new draft PR, with new validation evidence; merge only after review.
 
 ## Rollback
 

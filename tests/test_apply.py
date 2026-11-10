@@ -126,6 +126,21 @@ class ReplaySafety(unittest.TestCase):
         self.save()
         self.assert_clean_failure()
 
+    def test_explicit_intended_tree_can_differ_from_reference(self):
+        self.manifest['intended'] = {'tree': self.manifest['reference']['tree'], 'correction_units': ['0001'],
+                                     'difference_from_reference': {'files': ['file.txt']}}
+        self.manifest['reference']['tree'] = self.manifest['upstream']['tree']
+        self.save()
+        overlay.apply(str(self.source), self.dest)
+        self.assertEqual((self.dest / 'file.txt').read_text(), 'custom\n')
+
+    def test_undocumented_reference_divergence_rejected(self):
+        self.manifest['intended'] = {'tree': self.manifest['reference']['tree'], 'correction_units': ['0001'],
+                                     'difference_from_reference': {'files': ['wrong.txt']}}
+        self.manifest['reference']['tree'] = self.manifest['upstream']['tree']
+        self.save()
+        self.assert_clean_failure()
+
     def test_wrong_base_tree_rejected(self):
         self.manifest['upstream']['tree'] = '0' * 40
         self.module['patches'][0]['before_tree'] = '0' * 40
