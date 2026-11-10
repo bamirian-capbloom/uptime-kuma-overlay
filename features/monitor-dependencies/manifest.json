@@ -164,6 +164,27 @@
         "server/server.js",
         "test/backend-test/test-monitor-dependency-socket.ts"
       ]
+    },
+    {
+      "id": "0006b-dashboard-suppression-causes",
+      "file": "features/monitor-dependencies/patches/0006b-dashboard-suppression-causes.patch",
+      "documentation": "features/monitor-dependencies/docs/0006b-dashboard-suppression-causes.md",
+      "sha256": "267bcf53f2f314ca55c8e0806ccc011da4b0d15abfe607f4c3bcb1806dd1dbb0",
+      "requires": [
+        "0006a-clone-payload-safety"
+      ],
+      "source_issue": "https://github.com/bamirian-capbloom/uptime-kuma-overlay/issues/2",
+      "source_pr": null,
+      "provenance": "Issue #2 dashboard explanation developed on feature/dashboard-suppression-causes; the patch is the authoritative application source delta.",
+      "before_tree": "65031de845330b4858e305f87e35a6fb51e0b3e8",
+      "after_tree": "b25e2330f283229f9f15193cf7ac1c7f8e7f4a5f",
+      "files": [
+        "src/components/DependencySuppressionSummary.vue",
+        "src/lang/en.json",
+        "src/pages/DashboardHome.vue",
+        "test/e2e/specs/dependency-suppression-summary.spec.js",
+        "test/e2e/specs/monitor-dependency.spec.js"
+      ]
     }
   ]
 }

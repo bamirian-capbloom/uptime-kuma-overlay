@@ -1,6 +1,6 @@
 # monitor-dependencies
 
-Configures one dependency per monitor, gates status notifications, displays confirmed suppression and suppresses dependent browser DOWN toasts. Heartbeat truth and public status remain intact. Seven ordered logical units (including one documented clone-payload correction) preserve the reviewed changes of PRs #1–#6, including regression tests and responsive fixes.
+Configures one dependency per monitor, gates status notifications, displays confirmed suppression and suppresses dependent browser DOWN toasts. Heartbeat truth and public status remain intact. Eight ordered logical units preserve the reviewed changes of PRs #1–#6, the documented clone-payload correction, and the issue #2 dashboard suppression explanation, including regression tests and responsive fixes.
 
 Known semantics: shared authenticated access, process-local coordination, observed check ordering, unknown ancestors can defer indefinitely, provider attempts rather than guaranteed receipt.
 
@@ -18,8 +18,8 @@ Read [Understanding notification dependencies](docs/understanding-dependencies.m
 - [0004-integration-responsive](docs/0004-integration-responsive.md)
 - [0005-observation-reconciliation](docs/0005-observation-reconciliation.md)
 - [0006-browser-toast-suppression](docs/0006-browser-toast-suppression.md)
-
 - [0006a-clone-payload-safety](docs/0006a-clone-payload-safety.md)
+- [0006b-dashboard-suppression-causes](docs/0006b-dashboard-suppression-causes.md)
 
 ## Tests
 

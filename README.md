@@ -2,7 +2,7 @@
 
 Portable, ordered customizations for the official Uptime Kuma source. This repository stores patches, integrity manifests, regression tests embedded in those patches, and operator documentation—not a second application fork. Nothing deploys or publishes images.
 
-**Supported upstream:** `f6f6e6da26a29176ae0a2c928f507674eb593f66` only. The original seven PR units exactly reproduce merged fork master `7162f0d0fac3bf51b31fdfcab4bc3f2f285958c6`. Default replay also includes the documented `0006a` clone-payload correction found during validation; `manifest.json` records the corrected intended tree separately from the original reference tree. Current upstream master is newer; see [provenance and exclusions](docs/provenance.md). Read [validation results and limitations](docs/validation.md) before use. A draft is not a validated release.
+**Supported upstream:** `f6f6e6da26a29176ae0a2c928f507674eb593f66` only. The original seven PR units exactly reproduce merged fork master `7162f0d0fac3bf51b31fdfcab4bc3f2f285958c6`. Default replay also includes the documented `0006a` clone-payload correction and `0006b` dashboard suppression explanation from issue #2; `manifest.json` records the corrected intended tree separately from the original reference tree. Current upstream master is newer; see [provenance and exclusions](docs/provenance.md). Read [validation results and limitations](docs/validation.md) before use. A draft is not a validated release.
 
 | Feature | Behavior | Requires |
 | --- | --- | --- |
