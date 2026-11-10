@@ -1,0 +1,508 @@
+diff --git a/src/components/DependencySuppressionSummary.vue b/src/components/DependencySuppressionSummary.vue
+new file mode 100644
+index 0000000000000000000000000000000000000000..e4dbd0429a11e009798ada59de3f446a28a11829
+--- /dev/null
++++ b/src/components/DependencySuppressionSummary.vue
+@@ -0,0 +1,192 @@
++<template>
++    <section
++        v-if="rows.length"
++        class="shadow-box big-padding mb-3 suppression-summary"
++        aria-labelledby="suppression-summary-heading"
++        data-testid="dependency-suppression-summary"
++    >
++        <h2 id="suppression-summary-heading" class="h5 mb-3">
++            {{ $t("dependencySuppressedFailureAlerts", { count: rows.length }) }}
++        </h2>
++        <table class="table table-borderless mb-0 suppression-table">
++            <caption class="visually-hidden">
++                {{ $t("dependencySuppressionTableDescription") }}
++            </caption>
++            <thead>
++                <tr>
++                    <th scope="col">{{ $t("dependencyAffectedMonitor") }}</th>
++                    <th scope="col">{{ $t("dependencyMonitorState") }}</th>
++                    <th scope="col">{{ $t("dependencySuppressedBy") }}</th>
++                </tr>
++            </thead>
++            <tbody>
++                <tr v-for="row in rows" :key="row.monitor.id" :data-testid="`suppression-row-${row.monitor.id}`">
++                    <th scope="row" class="affected-monitor">
++                        <span class="mobile-label" aria-hidden="true">{{ $t("dependencyAffectedMonitor") }}</span>
++                        <router-link :to="`/dashboard/${row.monitor.id}`" data-testid="suppression-monitor-link">
++                            <bdi>{{ row.monitor.name }}</bdi>
++                        </router-link>
++                        <details
++                            class="dependency-path mt-2"
++                            :open="expanded[row.monitor.id] || false"
++                            @toggle="expanded[row.monitor.id] = $event.target.open"
++                        >
++                            <summary>{{ $t("dependencyPath") }}</summary>
++                            <ol v-if="expanded[row.monitor.id]" class="mt-2 mb-0">
++                                <li v-for="monitor in row.path" :key="monitor.id">
++                                    <router-link :to="`/dashboard/${monitor.id}`">
++                                        <bdi>{{ monitor.name }}</bdi>
++                                    </router-link>
++                                </li>
++                            </ol>
++                        </details>
++                    </th>
++                    <td>
++                        <span class="mobile-label" aria-hidden="true">{{ $t("dependencyMonitorState") }}</span>
++                        <Status :status="0" />
++                    </td>
++                    <td>
++                        <span class="mobile-label" aria-hidden="true">{{ $t("dependencySuppressedBy") }}</span>
++                        <div class="blocker">
++                            <router-link
++                                :to="`/dashboard/${row.blocker.id}`"
++                                class="blocker-link"
++                                data-testid="suppression-blocker-link"
++                            >
++                                <bdi>{{ row.blocker.name }}</bdi>
++                            </router-link>
++                            <Status :status="0" />
++                        </div>
++                    </td>
++                </tr>
++            </tbody>
++        </table>
++    </section>
++</template>
++
++<script>
++import Status from "./Status.vue";
++
++export default {
++    components: { Status },
++    data() {
++        return { expanded: {} };
++    },
++    computed: {
++        rows() {
++            if (!this.$root.socket.connected) {
++                return [];
++            }
++            // The existing resolver owns suppression semantics and accepted-beat ordering.
++            // Its blocker may be further along the chain than the configured dependency.
++            const monitors = this.$root.monitorList;
++            return Object.entries(this.$root.dependencyObservations)
++                .map(([id, observation]) => ({
++                    monitor: monitors[id],
++                    blocker: monitors[observation.blockerId],
++                    path: [Number(id), ...observation.ancestors].map((ancestor) => monitors[ancestor]).filter(Boolean),
++                }))
++                .filter((row) => row.monitor && row.blocker);
++        },
++    },
++};
++</script>
++
++<style scoped>
++.suppression-summary {
++    min-width: 0;
++}
++
++.suppression-table {
++    width: 100%;
++    table-layout: fixed;
++}
++
++.suppression-table th,
++.suppression-table td {
++    padding: 0.75rem;
++    vertical-align: top;
++    overflow-wrap: anywhere;
++    text-align: start;
++}
++
++.suppression-table thead th:nth-child(2) {
++    width: 22%;
++}
++
++.affected-monitor {
++    font-weight: normal;
++}
++
++.dependency-path {
++    font-size: 0.875rem;
++}
++
++.dependency-path summary {
++    cursor: pointer;
++}
++
++.dependency-path ol {
++    padding-inline-start: 1.5rem;
++}
++
++.blocker {
++    display: flex;
++    flex-wrap: wrap;
++    align-items: baseline;
++    gap: 0.35rem;
++    min-width: 0;
++}
++
++.blocker-link {
++    min-width: 0;
++}
++
++.mobile-label {
++    display: none;
++}
++
++@media (max-width: 700px) {
++    .suppression-table thead {
++        position: absolute;
++        width: 1px;
++        height: 1px;
++        padding: 0;
++        overflow: hidden;
++        clip: rect(0, 0, 0, 0);
++        white-space: nowrap;
++    }
++
++    .suppression-table tbody,
++    .suppression-table tr {
++        display: block;
++    }
++
++    .suppression-table tbody tr {
++        display: grid;
++        grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
++        margin-block-end: 1rem;
++    }
++
++    .suppression-table tbody tr:last-child {
++        margin-block-end: 0;
++    }
++
++    .suppression-table th,
++    .suppression-table td {
++        display: block;
++        padding: 0.35rem;
++        min-width: 0;
++    }
++
++    .affected-monitor {
++        grid-column: 1 / -1;
++    }
++
++    .mobile-label {
++        display: block;
++        margin-block-end: 0.35rem;
++        font-weight: 600;
++    }
++}
++</style>
+diff --git a/src/lang/en.json b/src/lang/en.json
+index 951c099fee5d00ce0a6b50cb29f54375f1ed2efd..1abe9809398d5daab34e1f150dc203e5ebc15e87 100644
+--- a/src/lang/en.json
++++ b/src/lang/en.json
+@@ -1652,5 +1652,11 @@
+     "dependencyMonitorHelp": "Suppress failure alerts when this dependency or one of its dependencies is down. Health checks and monitor status are unchanged.",
+     "dependencySelectionUnavailable": "Current dependency unavailable. Select another monitor or None.",
+     "dependencyAlertsSuppressed": "Alerts suppressed",
+-    "dependencySuppressionExplanation": "Failure alerts suppressed because {monitor} is down. Health checks and monitor status are unchanged."
++    "dependencySuppressionExplanation": "Failure alerts suppressed because {monitor} is down. Health checks and monitor status are unchanged.",
++    "dependencySuppressedFailureAlerts": "Suppressed failure alerts ({count})",
++    "dependencyAffectedMonitor": "Affected monitor",
++    "dependencyMonitorState": "Monitor state",
++    "dependencySuppressedBy": "Failure alerts suppressed by",
++    "dependencyPath": "Dependency path",
++    "dependencySuppressionTableDescription": "DOWN monitors and the dependencies suppressing their failure alerts."
+ }
+diff --git a/src/pages/DashboardHome.vue b/src/pages/DashboardHome.vue
+index 14454fbdda3edaaff6b3f50961ab14387567032b..ccaa88b2c0d87d1dda8afe90e47480cfbf728cb7 100644
+--- a/src/pages/DashboardHome.vue
++++ b/src/pages/DashboardHome.vue
+@@ -36,15 +36,7 @@
+                 </div>
+             </div>
+ 
+-            <div v-if="suppressedMonitors.length" class="shadow-box big-padding mb-3">
+-                <h2 class="h5">{{ $t("dependencyAlertsSuppressed") }}</h2>
+-                <ul class="mb-0">
+-                    <li v-for="monitor in suppressedMonitors" :key="monitor.id" class="mb-2">
+-                        <router-link :to="`/dashboard/${monitor.id}`">{{ monitor.name }}</router-link>
+-                        <DependencySuppression :monitor-id="monitor.id" class="ms-2" />
+-                    </li>
+-                </ul>
+-            </div>
++            <DependencySuppressionSummary />
+ 
+             <div class="shadow-box table-shadow-box table-wrapper">
+                 <div class="mb-3 text-end">
+@@ -123,7 +115,7 @@
+ </template>
+ 
+ <script>
+-import DependencySuppression from "../components/DependencySuppression.vue";
++import DependencySuppressionSummary from "../components/DependencySuppressionSummary.vue";
+ import Status from "../components/Status.vue";
+ import Datetime from "../components/Datetime.vue";
+ import Pagination from "v-pagination-3";
+@@ -131,7 +123,7 @@ import Confirm from "../components/Confirm.vue";
+ 
+ export default {
+     components: {
+-        DependencySuppression,
++        DependencySuppressionSummary,
+         Datetime,
+         Status,
+         Pagination,
+@@ -158,15 +150,6 @@ export default {
+         };
+     },
+     computed: {
+-        suppressedMonitors() {
+-            if (!this.$root.socket.connected) {
+-                return [];
+-            }
+-            return Object.keys(this.$root.dependencyObservations)
+-                .map((id) => this.$root.monitorList[id])
+-                .filter(Boolean);
+-        },
+-
+         showGroupColumn() {
+             return Object.values(this.$root.monitorList).some((m) => m.parent != null);
+         },
+diff --git a/test/e2e/specs/dependency-suppression-summary.spec.js b/test/e2e/specs/dependency-suppression-summary.spec.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..ed28611c8d288bd319439046018b388333b5884d
+--- /dev/null
++++ b/test/e2e/specs/dependency-suppression-summary.spec.js
+@@ -0,0 +1,191 @@
++import { expect, test } from "../fixtures";
++import { login, restoreSqliteSnapshot } from "../util-test";
++
++// Each scenario includes real form saves, reconnects or several navigation steps.
++test.setTimeout(60000);
++
++/**
++ * Create a real push monitor with an optional direct dependency.
++ * @param {import('@playwright/test').Page} page Browser page
++ * @param {string} name Monitor name
++ * @param {string|null} dependency Direct dependency ID
++ * @returns {Promise<{id: string, url: string}>} Persisted monitor and push endpoint
++ */
++async function addMonitor(page, name, dependency = null) {
++    await page.getByRole("link", { name: "Add New Monitor", exact: true }).click();
++    await page.getByTestId("monitor-type-select").selectOption("push");
++    await page.getByTestId("friendly-name-input").fill(name);
++    if (dependency) {
++        await page.getByLabel("Monitor Dependency", { exact: true }).selectOption(dependency);
++    }
++    const url = await page.locator("#push-url").inputValue();
++    await page.getByTestId("save-button").click();
++    await page.waitForURL(/\/dashboard\/\d+$/);
++    return { id: page.url().split("/").pop(), url };
++}
++
++/**
++ * Submit an observed state through the actual push handler.
++ * @param {import('@playwright/test').APIRequestContext} request HTTP client
++ * @param {object} monitor Push monitor
++ * @param {string} status UP or DOWN
++ * @returns {Promise<void>} Resolves after accepted push
++ */
++async function push(request, monitor, status) {
++    const url = new URL(monitor.url);
++    url.searchParams.set("status", status);
++    expect((await (await request.get(url.toString())).json()).ok).toBe(true);
++}
++
++/**
++ * Create Website -> Gateway -> Router and start with accepted UP observations.
++ * @param {import('@playwright/test').Page} page Browser page
++ * @param {import('@playwright/test').APIRequestContext} request HTTP client
++ * @param {string[]} names Optional display names, root first
++ * @returns {Promise<object>} Chain monitors
++ */
++async function chain(page, request, names = ["Router", "Gateway", "Website"]) {
++    const router = await addMonitor(page, names[0]);
++    const gateway = await addMonitor(page, names[1], router.id);
++    const website = await addMonitor(page, names[2], gateway.id);
++    for (const monitor of [router, gateway, website]) {
++        await push(request, monitor, "up");
++    }
++    await page.goto("./dashboard");
++    return { router, gateway, website };
++}
++
++const summary = (page) => page.getByTestId("dependency-suppression-summary");
++const row = (page, monitor) => page.getByTestId(`suppression-row-${monitor.id}`);
++
++test.beforeEach(async ({ page }) => {
++    await restoreSqliteSnapshot();
++    await page.goto("./dashboard");
++    await login(page);
++    await expect(page.getByRole("link", { name: "Add New Monitor", exact: true })).toBeVisible();
++});
++
++test("summary names the current blocker, exposes linked paths and preserves actual DOWN counts", async ({
++    page,
++    request,
++}) => {
++    const { router, gateway, website } = await chain(page, request);
++    await expect(summary(page)).toHaveCount(0);
++    for (const monitor of [router, gateway, website]) {
++        await push(request, monitor, "down");
++    }
++    await expect(summary(page).getByRole("heading")).toHaveText("Suppressed failure alerts (2)");
++    await expect(row(page, website).getByTestId("suppression-monitor-link")).toHaveAttribute(
++        "href",
++        `/dashboard/${website.id}`
++    );
++    await expect(row(page, website).getByTestId("suppression-blocker-link")).toHaveText("Gateway");
++    await expect(row(page, gateway).getByTestId("suppression-blocker-link")).toHaveAttribute(
++        "href",
++        `/dashboard/${router.id}`
++    );
++    await expect(page.locator(".num.text-danger")).toHaveText("3");
++    const disclosure = row(page, website).locator("summary");
++    await disclosure.focus();
++    await disclosure.press("Enter");
++    await expect(row(page, website).locator("details")).toHaveAttribute("open", "");
++    await expect(row(page, website).locator("ol a")).toHaveText(["Website", "Gateway", "Router"]);
++    await expect(row(page, website).locator("ol a").last()).toHaveAttribute("href", `/dashboard/${router.id}`);
++    await row(page, website).getByTestId("suppression-blocker-link").click();
++    await page.waitForURL(`**/dashboard/${gateway.id}`);
++    await expect(page.getByRole("heading", { level: 1 })).toContainText("Gateway");
++    await page.goto("./dashboard");
++    await expect(summary(page).getByRole("heading")).toHaveText("Suppressed failure alerts (2)");
++
++    // The direct dependency is now UP; the actual blocker is the more distant Router.
++    await push(request, gateway, "up");
++    await expect(row(page, gateway)).toHaveCount(0);
++    await expect(row(page, website).getByTestId("suppression-blocker-link")).toHaveText("Router");
++    await expect(page.locator(".num.text-danger")).toHaveText("2");
++    await row(page, website).locator("summary").click();
++    await expect(row(page, website).locator("ol a")).toHaveText(["Website", "Gateway", "Router"]);
++    await push(request, router, "up");
++    await expect(summary(page)).toHaveCount(0);
++    await expect(page.locator(".num.text-danger")).toHaveText("1");
++});
++
++test("summary reconciles edits, pause, deletion, disconnect and stale history", async ({ page, request }) => {
++    const { router, gateway, website } = await chain(page, request);
++    await push(request, router, "down");
++    await push(request, website, "down");
++    await expect(row(page, website).getByTestId("suppression-blocker-link")).toHaveText("Router");
++    await page.context().setOffline(true);
++    await expect(summary(page)).toHaveCount(0);
++    await page.context().setOffline(false);
++    await page.reload();
++    await expect(row(page, website).getByTestId("suppression-blocker-link")).toHaveText("Router");
++    await push(request, router, "up");
++    await page.evaluate((id) => {
++        const root = document.querySelector("#app").__vue_app__._container._vnode.component.proxy;
++        root.updateLastBeat(id, { status: 0, time: "2000-01-01 00:00:00.000" });
++    }, router.id);
++    await expect(summary(page)).toHaveCount(0);
++    await push(request, router, "down");
++    await expect(row(page, website)).toBeVisible();
++    await page.goto(`./edit/${website.id}`);
++    await expect(page.getByTestId("friendly-name-input")).toHaveValue("Website");
++    await page.getByLabel("Monitor Dependency", { exact: true }).selectOption({ label: "None" });
++    await page.getByTestId("save-button").click();
++    await expect(page.getByText("Saved.", { exact: true })).toBeVisible();
++    await page.goto("./dashboard");
++    await expect(summary(page)).toHaveCount(0);
++    await page.goto(`./edit/${website.id}`);
++    await expect(page.getByTestId("friendly-name-input")).toHaveValue("Website");
++    await page.getByLabel("Monitor Dependency", { exact: true }).selectOption(gateway.id);
++    await page.getByTestId("save-button").click();
++    await expect(page.getByText("Saved.", { exact: true })).toBeVisible();
++    await page.goto(`./dashboard/${router.id}`);
++    await page.getByRole("button", { name: "Pause", exact: true }).click();
++    await page.locator(".modal.show").getByRole("button", { name: "Yes", exact: true }).click();
++    await expect(page.getByRole("button", { name: "Resume", exact: true })).toBeVisible();
++    await page.goto("./dashboard");
++    await expect(summary(page)).toHaveCount(0);
++    await page.goto(`./dashboard/${router.id}`);
++    await page.getByRole("button", { name: "Resume", exact: true }).click();
++    await expect(page.getByRole("button", { name: "Pause", exact: true })).toBeVisible();
++    await push(request, router, "down");
++    await page.goto("./dashboard");
++    await expect(row(page, website)).toBeVisible();
++    await page.goto(`./dashboard/${router.id}`);
++    await page.getByRole("button", { name: "Delete", exact: true }).click();
++    await page.locator(".modal.show").getByRole("button", { name: "Yes", exact: true }).click();
++    await page.goto("./dashboard");
++    await expect(summary(page)).toHaveCount(0);
++});
++
++test("summary escapes long names and stays usable on a narrow dark RTL dashboard", async ({
++    page,
++    request,
++}, testInfo) => {
++    const name = '<img src=x onerror="window.summaryInjected=true"> بوابة ' + "Long dependency ".repeat(5);
++    const { router, website } = await chain(page, request, [name, "Gateway " + "بوابة ".repeat(12), "Website"]);
++    await push(request, router, "down");
++    await push(request, website, "down");
++    await expect(row(page, website).getByTestId("suppression-blocker-link")).toHaveText(name);
++    await expect(summary(page).locator("img")).toHaveCount(0);
++    expect(await page.evaluate(() => window.summaryInjected)).toBeUndefined();
++    await page.screenshot({ path: testInfo.outputPath("summary-desktop.png"), animations: "disabled" });
++    await page.evaluate(() => {
++        localStorage.locale = "ar-SY";
++    });
++    await page.reload();
++    await expect(page.locator("html")).toHaveAttribute("dir", "rtl");
++    await page.evaluate(() => {
++        document.body.classList.add("dark");
++    });
++    await page.setViewportSize({ width: 390, height: 844 });
++    await expect(summary(page)).toBeVisible();
++    await row(page, website).locator("summary").focus();
++    await page.keyboard.press("Enter");
++    await expect(row(page, website).locator("ol a")).toHaveText(["Website", "Gateway " + "بوابة ".repeat(12), name]);
++    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
++    const bounds = await summary(page).boundingBox();
++    expect(bounds.x).toBeGreaterThanOrEqual(0);
++    expect(bounds.x + bounds.width).toBeLessThanOrEqual(390);
++    await page.screenshot({ path: testInfo.outputPath("summary-mobile-dark-rtl.png"), animations: "disabled" });
++});
+diff --git a/test/e2e/specs/monitor-dependency.spec.js b/test/e2e/specs/monitor-dependency.spec.js
+index 31755e816b583157fd533da7988fbf16e2cacff0..8c08e14d0000270a7b1d35e0eb4c8a3bb38b6cc2 100644
+--- a/test/e2e/specs/monitor-dependency.spec.js
++++ b/test/e2e/specs/monitor-dependency.spec.js
+@@ -95,10 +95,12 @@ test("shows backend suppression while preserving DOWN, clears stale state and su
+         await push(request, service.url, "down");
+         await expect(label).toBeVisible();
+     }
+-    expect(await page.evaluate(() => {
+-        window.suppressionObserver.disconnect();
+-        return window.suppressionFlickers;
+-    })).toBe(0);
++    expect(
++        await page.evaluate(() => {
++            window.suppressionObserver.disconnect();
++            return window.suppressionFlickers;
++        })
++    ).toBe(0);
+     await expect(page.getByTestId("monitor-list").locator(".suppression-label")).toHaveCount(1);
+     await label.focus();
+     await expect(page.locator(".suppression-explanation")).toContainText("Dependency Gateway is down");
+@@ -106,9 +108,17 @@ test("shows backend suppression while preserving DOWN, clears stale state and su
+     await expect(page.locator(".suppression-explanation")).toHaveCount(0);
+     await page.goto("./dashboard");
+     // Login snapshots reconcile suppression without another child check.
+-    await expect(page.locator(".suppression-label")).toHaveCount(2);
++    await expect(page.locator(".suppression-label")).toHaveCount(1);
++    await expect(page.getByTestId("dependency-suppression-summary")).toBeVisible();
++    await expect(page.getByTestId(`suppression-row-${service.id}`).getByTestId("suppression-blocker-link")).toHaveText(
++        "Dependency Gateway"
++    );
+     await push(request, service.url, "down");
+-    await expect(page.locator(".suppression-label")).toHaveCount(2);
++    await expect(page.locator(".suppression-label")).toHaveCount(1);
++    await expect(page.getByTestId("dependency-suppression-summary")).toBeVisible();
++    await expect(page.getByTestId(`suppression-row-${service.id}`).getByTestId("suppression-blocker-link")).toHaveText(
++        "Dependency Gateway"
++    );
+     await expect(page.locator(".num.text-danger")).toHaveText("2");
+     await expect(page.getByTestId("monitor-list").locator(".suppression-label")).toBeVisible();
+     await screenshot(testInfo, page);

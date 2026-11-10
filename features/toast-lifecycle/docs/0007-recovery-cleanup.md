@@ -18,7 +18,7 @@ Exact changed function/hunk contexts are in the [patch](../patches/0007-recovery
 
 ## Dependencies and applicable baseline
 
-Official upstream `f6f6e6da26a29176ae0a2c928f507674eb593f66` only. Requires 0006a-clone-payload-safety (and prior monitor-dependencies units). Apply through the manifest driver, never by glob order. Source: [fork PR #7](https://github.com/bamirian-capbloom/uptime-kuma/pull/7), net diff `6422ad9ce8e91bb023e991b002614bbb7f5e4cc6` → `7162f0d0fac3bf51b31fdfcab4bc3f2f285958c6`. The manifest pins both input/output Git tree objects and the patch SHA-256. The patch bytes preserve the complete logical PR unit; input/output tree checkpoints include the independently documented 0006a correction in its predecessor.
+Official upstream `f6f6e6da26a29176ae0a2c928f507674eb593f66` only. Requires 0006b-dashboard-suppression-causes (and prior monitor-dependencies units). Apply through the manifest driver, never by glob order. Source: [fork PR #7](https://github.com/bamirian-capbloom/uptime-kuma/pull/7), net diff `6422ad9ce8e91bb023e991b002614bbb7f5e4cc6` → `7162f0d0fac3bf51b31fdfcab4bc3f2f285958c6`. The manifest pins both input/output Git tree objects and the patch SHA-256. The patch bytes preserve the complete logical PR unit; input/output tree checkpoints include the independently documented 0006a correction and 0006b dashboard enhancement in its predecessor.
 
 ## API and schema effects
 
