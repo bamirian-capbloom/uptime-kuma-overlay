@@ -1,0 +1,169 @@
+{
+  "id": "monitor-dependencies",
+  "requires": [],
+  "baseline": "f6f6e6da26a29176ae0a2c928f507674eb593f66",
+  "patches": [
+    {
+      "id": "0001-configuration",
+      "file": "features/monitor-dependencies/patches/0001-configuration.patch",
+      "documentation": "features/monitor-dependencies/docs/0001-configuration.md",
+      "sha256": "2a9fae1a6f9221da196b36d57252e7403394504967f99bc7e96717903b9f83ea",
+      "requires": [],
+      "source_pr": 1,
+      "source_from": "f6f6e6da26a29176ae0a2c928f507674eb593f66",
+      "source_to": "d3f47d768bb87f67afd211153b13c8e994b06956",
+      "before_tree": "80c5790adb545fa65dff1e899f14bb16116c755c",
+      "after_tree": "b5e54351da15b44714f7f067111baf86a9bce0ea",
+      "files": [
+        "db/knex_migrations/2026-11-05-0000-add-monitor-dependency.js",
+        "server/compact-monitor.ts",
+        "server/model/monitor.js",
+        "server/monitor-dependency.js",
+        "server/server.js",
+        "test/backend-test/test-compact-monitor.ts",
+        "test/backend-test/test-monitor-dependency-socket.ts",
+        "test/backend-test/test-monitor-dependency.ts",
+        "test/backend-test/test-monitor.ts",
+        "test/backend-test/test-server-config.ts",
+        "test/fixtures/monitor-columns.json"
+      ]
+    },
+    {
+      "id": "0002-notification-gate",
+      "file": "features/monitor-dependencies/patches/0002-notification-gate.patch",
+      "documentation": "features/monitor-dependencies/docs/0002-notification-gate.md",
+      "sha256": "767ac6704073f3d8eb189bacb0ed4335a605ec24871677e510b4c3e8aa8eb37f",
+      "requires": [
+        "0001-configuration"
+      ],
+      "source_pr": 2,
+      "source_from": "d3f47d768bb87f67afd211153b13c8e994b06956",
+      "source_to": "160ab3af8b29089ae3b897372f3c9e76cd2c38df",
+      "before_tree": "b5e54351da15b44714f7f067111baf86a9bce0ea",
+      "after_tree": "e87b271af56cacdd8e86d4197414b88c73aefa26",
+      "files": [
+        "db/knex_migrations/2026-11-06-0000-dependency-notification-state.js",
+        "docs/dependency-notifications.md",
+        "server/dependency-notification.js",
+        "server/model/monitor.js",
+        "server/routers/api-router.js",
+        "test/backend-test/test-api.ts",
+        "test/backend-test/test-dependency-notification.ts",
+        "test/backend-test/test-monitor-beat.ts"
+      ]
+    },
+    {
+      "id": "0003-dashboard-ui",
+      "file": "features/monitor-dependencies/patches/0003-dashboard-ui.patch",
+      "documentation": "features/monitor-dependencies/docs/0003-dashboard-ui.md",
+      "sha256": "1d92a4418b1a1400773c6dca86179aee532aedd1888a6f015cdc00d0de296215",
+      "requires": [
+        "0002-notification-gate"
+      ],
+      "source_pr": 3,
+      "source_from": "160ab3af8b29089ae3b897372f3c9e76cd2c38df",
+      "source_to": "82a3d2108c2de6142f974af799df430176c787bc",
+      "before_tree": "e87b271af56cacdd8e86d4197414b88c73aefa26",
+      "after_tree": "2c4e85e64026d83f4c9915e3a970b72c80ad0c33",
+      "files": [
+        "docs/dependency-ui.md",
+        "src/components/DependencySuppression.vue",
+        "src/components/MonitorListItem.vue",
+        "src/lang/en.json",
+        "src/mixins/socket.js",
+        "src/monitor-dependency.ts",
+        "src/pages/DashboardHome.vue",
+        "src/pages/Details.vue",
+        "src/pages/EditMonitor.vue",
+        "test/e2e/specs/monitor-dependency.spec.js",
+        "test/e2e/specs/monitor-list-actions.spec.js",
+        "test/frontend-test/test-monitor-dependency.ts"
+      ]
+    },
+    {
+      "id": "0004-integration-responsive",
+      "file": "features/monitor-dependencies/patches/0004-integration-responsive.patch",
+      "documentation": "features/monitor-dependencies/docs/0004-integration-responsive.md",
+      "sha256": "b911a8b9a378e67579e48047fbb1df542d396ba84d2cfbb8e90ce07c842bd58d",
+      "requires": [
+        "0003-dashboard-ui"
+      ],
+      "source_pr": 4,
+      "source_from": "82a3d2108c2de6142f974af799df430176c787bc",
+      "source_to": "d48bcf972fb3e93388fd089e6ef09872c880708b",
+      "before_tree": "2c4e85e64026d83f4c9915e3a970b72c80ad0c33",
+      "after_tree": "3ff0f93c79a9e950c3e8e60b591f59fa2ed212e2",
+      "files": [
+        "docs/dependency-integration-testing.md",
+        "src/components/Tooltip.vue",
+        "src/pages/Details.vue",
+        "test/backend-test/test-dependency-delivery.ts",
+        "test/backend-test/test-dependency-mariadb.ts",
+        "test/e2e/specs/monitor-dependency.spec.js"
+      ]
+    },
+    {
+      "id": "0005-observation-reconciliation",
+      "file": "features/monitor-dependencies/patches/0005-observation-reconciliation.patch",
+      "documentation": "features/monitor-dependencies/docs/0005-observation-reconciliation.md",
+      "sha256": "ca2a09b88cf04ebbc96f5d4b4f5efc8c3926d7b6df83494ee47368818e9d77fd",
+      "requires": [
+        "0004-integration-responsive"
+      ],
+      "source_pr": 5,
+      "source_from": "d48bcf972fb3e93388fd089e6ef09872c880708b",
+      "source_to": "e52926fb3feb736e678007630c98eb34c12830c3",
+      "before_tree": "3ff0f93c79a9e950c3e8e60b591f59fa2ed212e2",
+      "after_tree": "2b722c2d2efa500c63462a862a90d6482cef13d2",
+      "files": [
+        "docs/dependency-ui.md",
+        "server/compact-monitor.ts",
+        "server/model/monitor.js",
+        "src/mixins/socket.js",
+        "src/monitor-dependency.ts",
+        "test/backend-test/test-compact-monitor.ts",
+        "test/backend-test/test-heartbeat-serialization.ts",
+        "test/backend-test/test-monitor-dependency-socket.ts",
+        "test/backend-test/test-server-config.ts",
+        "test/e2e/specs/monitor-dependency.spec.js",
+        "test/frontend-test/test-monitor-dependency.ts"
+      ]
+    },
+    {
+      "id": "0006-browser-toast-suppression",
+      "file": "features/monitor-dependencies/patches/0006-browser-toast-suppression.patch",
+      "documentation": "features/monitor-dependencies/docs/0006-browser-toast-suppression.md",
+      "sha256": "2e902ca100c33e9e5ece5bab4c0482e2e870b24d2dc90ddeb4311d3acce0f27a",
+      "requires": [
+        "0005-observation-reconciliation"
+      ],
+      "source_pr": 6,
+      "source_from": "e52926fb3feb736e678007630c98eb34c12830c3",
+      "source_to": "6422ad9ce8e91bb023e991b002614bbb7f5e4cc6",
+      "before_tree": "2b722c2d2efa500c63462a862a90d6482cef13d2",
+      "after_tree": "1ec2f50c9572d2741c50429e1d929f6ad02bc1f2",
+      "files": [
+        "src/dependency-down-toasts.ts",
+        "src/mixins/socket.js",
+        "test/frontend-test/test-dependency-down-toasts.ts"
+      ]
+    },
+    {
+      "id": "0006a-clone-payload-safety",
+      "file": "features/monitor-dependencies/patches/0006a-clone-payload-safety.patch",
+      "documentation": "features/monitor-dependencies/docs/0006a-clone-payload-safety.md",
+      "sha256": "2db5eff799a259eb745161bb48115110c72b3fc476d9ed13fccd6e3168f641e4",
+      "requires": [
+        "0006-browser-toast-suppression"
+      ],
+      "source_pr": null,
+      "provenance": "Overlay correction for clone failure found during full browser validation of merged fork PRs #1\u2013#7",
+      "before_tree": "1ec2f50c9572d2741c50429e1d929f6ad02bc1f2",
+      "after_tree": "65031de845330b4858e305f87e35a6fb51e0b3e8",
+      "files": [
+        "server/server.js",
+        "test/backend-test/test-monitor-dependency-socket.ts"
+      ]
+    }
+  ]
+}

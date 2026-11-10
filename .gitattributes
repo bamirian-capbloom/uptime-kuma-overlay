@@ -1,0 +1,3 @@
+* text=auto eol=lf
+# Unified diffs contain required blank context lines consisting of a space.
+*.patch -text -whitespace

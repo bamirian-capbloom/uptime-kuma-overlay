@@ -1,0 +1,126 @@
+{
+  "format_version": 1,
+  "date_local": "2026-11-09",
+  "timezone": "America/New_York",
+  "node": "26.5.0",
+  "docker": "29.9.2",
+  "original_reference_tree": "be13476ed780b6bf0eb5b129023f504a226102b3",
+  "intended_tree": "e843c85f2cf45c151abb07fd27ae37fc9ea3d004",
+  "checks": [
+    {
+      "name": "overlay safety",
+      "local_log": "/tmp/kuma-overlay-selftests.log",
+      "log_sha256": "19088812d85ceef247f2c9873e82b04cb8c5f7fdd7abe3f1b3192eaa9d2b5cd2",
+      "result": {
+        "passed": 13,
+        "failed": 0
+      }
+    },
+    {
+      "name": "fresh lockfile",
+      "local_log": "/tmp/kuma-overlay-npm-ci.log",
+      "log_sha256": "e5bd129178318ac91e78752a28fe0fc404f2cb545d591ccbc00e7dab70fd18f6",
+      "result": {
+        "exit_code": 0
+      }
+    },
+    {
+      "name": "corrected production build",
+      "local_log": "/tmp/kuma-overlay-corrected-build.log",
+      "log_sha256": "657e3d7c81ac081c6332788b0b91733b8df7c9c9102f10567722ff7259f44a17",
+      "result": {
+        "exit_code": 0
+      }
+    },
+    {
+      "name": "corrected lint",
+      "local_log": "/tmp/kuma-overlay-corrected-lint.log",
+      "log_sha256": "8d26ebdaedd46991b7a7293f15d210b2e32f395ad242279390fa8aa3d44f69e4",
+      "result": {
+        "errors": 0,
+        "warnings": 84
+      }
+    },
+    {
+      "name": "corrected feature regressions",
+      "local_log": "/tmp/kuma-overlay-corrected-regression.log",
+      "log_sha256": "c6cc8be261c62c14c55a0f19be07e8a53945691f37e1f8ccad0cea38e4e57b28",
+      "result": {
+        "passed": 59,
+        "failed": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "name": "corrected dependency-only checks",
+      "local_log": "/tmp/kuma-overlay-dependencies-corrected-tests.log",
+      "log_sha256": "7b78f914eded9f79b16371023a48018bffbf8a8fb986887ab14ca2c636f09050",
+      "result": {
+        "passed": 20,
+        "failed": 0
+      }
+    },
+    {
+      "name": "original full backend",
+      "local_log": "/tmp/kuma-overlay-full-backend.log",
+      "log_sha256": "7aeb9477513c63082fdb3e0ef6117f3e2689d0405379ce72ad15601d57bf4269",
+      "result": {
+        "passed": 660,
+        "failed": 1,
+        "skipped": 1,
+        "failure": "MQTT disposable container port startup deadline"
+      }
+    },
+    {
+      "name": "corrected MQTT isolated retry",
+      "local_log": "/tmp/kuma-overlay-mqtt-rerun.log",
+      "log_sha256": "a9ed2874318c745c9f85e4b188a243c3dd196a647b10a545fc9f83cc3e9c4418",
+      "result": {
+        "passed": 1,
+        "failed": 0
+      }
+    },
+    {
+      "name": "original full browser",
+      "local_log": "/tmp/kuma-overlay-browser.log",
+      "log_sha256": "fd7477b275ebbf726acedecc0057d93130a18ec0b05c2a636454eb9e22db5283",
+      "result": {
+        "passed": 64,
+        "failed": 1,
+        "failure": "clone derived-field import; fixed by 0006a"
+      }
+    },
+    {
+      "name": "corrected full browser",
+      "local_log": "/tmp/kuma-overlay-corrected-browser.log",
+      "log_sha256": "f2a0fdeefb295e4097ab8db28444e5da4f7e91a0c2fc654fe2c18db5c273c112",
+      "result": {
+        "passed": 65,
+        "failed": 0
+      }
+    },
+    {
+      "name": "review fix: Git environment isolation",
+      "local_log": "/tmp/kuma-overlay-git-isolation-tests.log",
+      "log_sha256": "038fdeeea741ad4da750ff800ce10960e075ebf9961921ee287197d10f59a298",
+      "result": {
+        "passed": 18,
+        "failed": 0,
+        "new_regression_tests": 5,
+        "pre_fix_regressions_reproduced": 2,
+        "both_output_trees_unchanged": true
+      }
+    },
+    {
+      "name": "review fix: end-to-end validator with inherited Git context",
+      "local_log": "/tmp/kuma-overlay-isolated-validation.log",
+      "log_sha256": "9f985d9ec15ff7ca050edf834ec07838e8f45f123a83176e379c5b339d1102db",
+      "result": {
+        "production_build": "passed",
+        "feature_regressions_passed": 59,
+        "failed": 0,
+        "caller_repository_and_external_index_preserved": true
+      }
+    }
+  ]
+}

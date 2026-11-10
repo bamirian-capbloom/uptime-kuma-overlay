@@ -1,0 +1,808 @@
+diff --git a/db/knex_migrations/2026-11-05-0000-add-monitor-dependency.js b/db/knex_migrations/2026-11-05-0000-add-monitor-dependency.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..e6f6845e262bc1be87b8f1fbb82bb36672e02418
+--- /dev/null
++++ b/db/knex_migrations/2026-11-05-0000-add-monitor-dependency.js
+@@ -0,0 +1,21 @@
++exports.up = function (knex) {
++    return knex.schema.alterTable("monitor", (table) => {
++        table
++            .integer("dependency_monitor_id")
++            .unsigned()
++            .nullable()
++            .references("id")
++            .inTable("monitor")
++            .onDelete("SET NULL")
++            .onUpdate("CASCADE");
++        table.index("dependency_monitor_id");
++    });
++};
++
++exports.down = function (knex) {
++    return knex.schema.alterTable("monitor", (table) => {
++        table.dropForeign("dependency_monitor_id");
++        table.dropIndex("dependency_monitor_id");
++        table.dropColumn("dependency_monitor_id");
++    });
++};
+diff --git a/server/compact-monitor.ts b/server/compact-monitor.ts
+index bccb1b7ffd50c0d7181eb179055a47d97ff8edb5..bfa2264592caeec6ffb3f7aa722564e1eec69b5b 100644
+--- a/server/compact-monitor.ts
++++ b/server/compact-monitor.ts
+@@ -11,6 +11,7 @@ export interface CompactMonitor {
+     type: string;
+     active: boolean | undefined;
+     parent: number | null;
++    dependencyMonitorId: number | null;
+     childrenIDs: number[];
+     tags: unknown[];
+     path: string[];
+@@ -23,6 +24,13 @@ export interface CompactMonitor {
+  * Fields the dashboard needs for one monitor. toJSON() builds ~60 fields per
+  * monitor, which costs over a second for thousands of monitors at login.
+  * @param monitor Monitor bean
++ * @param monitor.id Monitor ID
++ * @param monitor.name Display name
++ * @param monitor.type Monitor type
++ * @param monitor.parent Parent group ID
++ * @param monitor.dependency_monitor_id Direct dependency ID
++ * @param monitor.interval Check interval in seconds
++ * @param monitor.weight Display order weight
+  * @param preloadData Data prepared for the whole list
+  * @returns Slim monitor payload
+  */
+@@ -32,6 +40,7 @@ export function toCompactMonitor(
+         name: string;
+         type: string;
+         parent?: number | null;
++        dependency_monitor_id?: number | null;
+         interval: number;
+         weight?: number | null;
+     },
+@@ -45,6 +54,7 @@ export function toCompactMonitor(
+         type: monitor.type,
+         active: preloadData.activeStatus.get(monitor.id),
+         parent: monitor.parent ?? null,
++        dependencyMonitorId: monitor.dependency_monitor_id ?? null,
+         childrenIDs: preloadData.childrenIDs.get(monitor.id) || [],
+         tags: preloadData.tags.get(monitor.id) || [],
+         path,
+diff --git a/server/model/monitor.js b/server/model/monitor.js
+index 3a5051b4c40fd3fe05a37f44950a17586eb6dffa..728b8b061708aee44f7465ae5b9a2175fb40e9ba 100644
+--- a/server/model/monitor.js
++++ b/server/model/monitor.js
+@@ -65,6 +65,7 @@ const { promisify } = require("node:util");
+ const brotliCompress = promisify(zlib.brotliCompress);
+ const DomainExpiry = require("./domain_expiry");
+ const { monitorConfigSchema } = require("../types");
++const { withMonitorDependencyLock } = require("../monitor-dependency");
+ 
+ const rootCertificates = rootCertificatesFingerprints();
+ 
+@@ -133,6 +134,7 @@ class Monitor extends BeanModel {
+             path,
+             pathName,
+             parent: this.parent,
++            dependencyMonitorId: this.dependency_monitor_id ?? null,
+             childrenIDs: preloadData.childrenIDs.get(this.id) || [],
+             url: this.url,
+             wsIgnoreSecWebsocketAcceptHeader: this.getWsIgnoreSecWebsocketAcceptHeader(),
+@@ -2108,16 +2110,27 @@ class Monitor extends BeanModel {
+      * @returns {Promise<void>}
+      */
+     static async deleteMonitor(monitorID) {
+-        const server = UptimeKumaServer.getInstance();
++        return withMonitorDependencyLock(async () => {
++            const server = UptimeKumaServer.getInstance();
+ 
+-        // Stop the monitor if it's running
+-        if (monitorID in server.monitorList) {
+-            await server.monitorList[monitorID].stop();
+-            delete server.monitorList[monitorID];
+-        }
++            // Stop the monitor if it's running
++            if (monitorID in server.monitorList) {
++                await server.monitorList[monitorID].stop();
++                delete server.monitorList[monitorID];
++            }
+ 
+-        // Delete from database
+-        await R.exec("DELETE FROM monitor WHERE id = ? ", [monitorID]);
++            // Explicit cleanup also works when SQLite foreign keys are disabled.
++            await R.knex.transaction(async (trx) => {
++                await trx("monitor").where("dependency_monitor_id", monitorID).update({ dependency_monitor_id: null });
++                await trx("monitor").where("id", monitorID).del();
++            });
++
++            for (const monitor of Object.values(server.monitorList)) {
++                if (monitor.dependency_monitor_id === Number(monitorID)) {
++                    monitor.dependency_monitor_id = null;
++                }
++            }
++        });
+     }
+ 
+     /**
+diff --git a/server/monitor-dependency.js b/server/monitor-dependency.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..688d91a275fbb6e9d6382608de500fe2c0c85bcb
+--- /dev/null
++++ b/server/monitor-dependency.js
+@@ -0,0 +1,90 @@
++const { R } = require("redbean-node");
++
++let pendingChange = Promise.resolve();
++
++/**
++ * Serialize dependency saves and deletions in this server process. Validation
++ * must run inside the lock so simultaneous edits cannot introduce a cycle.
++ * @param {Function} action Change to perform
++ * @returns {Promise<any>} Result of the change
++ */
++function withMonitorDependencyLock(action) {
++    const result = pendingChange.then(action);
++    pendingChange = result.catch(() => {});
++    return result;
++}
++
++/**
++ * Match the shared-access model: authenticated users can manage every monitor.
++ * Callers must authenticate the session before supplying its user ID.
++ * @param {object|null} monitor Monitor bean
++ * @param {string} userID Authenticated user ID
++ * @returns {void}
++ * @throws {Error} If the monitor does not exist or is inaccessible
++ */
++function assertMonitorAccess(monitor, userID) {
++    if (!userID || !monitor) {
++        throw new Error("Monitor not found or access denied");
++    }
++}
++
++/**
++ * Validate a single dependency and every link in its chain.
++ * @param {number|null} dependencyMonitorId Proposed dependency, or null to clear
++ * @param {number|undefined} monitorID Monitor being saved (absent on creation)
++ * @param {string} userID Authenticated user ID
++ * @returns {Promise<number|null>} Validated dependency ID
++ */
++async function validateMonitorDependency(dependencyMonitorId, monitorID, userID) {
++    if (dependencyMonitorId === null) {
++        return null;
++    }
++    if (!Number.isSafeInteger(dependencyMonitorId) || dependencyMonitorId <= 0) {
++        throw new Error("Invalid dependency monitor ID");
++    }
++
++    const visited = new Set(monitorID ? [Number(monitorID)] : []);
++    let currentID = dependencyMonitorId;
++    while (currentID !== null) {
++        if (!Number.isSafeInteger(currentID) || currentID <= 0) {
++            throw new Error("Invalid dependency monitor ID");
++        }
++        if (visited.has(currentID)) {
++            throw new Error("Monitor dependency would create a circular dependency");
++        }
++        visited.add(currentID);
++        const dependency = await R.findOne("monitor", " id = ? ", [currentID]);
++        assertMonitorAccess(dependency, userID);
++        currentID = dependency.dependency_monitor_id ?? null;
++    }
++    return dependencyMonitorId;
++}
++
++/**
++ * Save a monitor atomically with respect to other dependency changes.
++ * Omitted fields preserve the stored value on edit and default to null on add.
++ * @param {object} bean Monitor bean to save
++ * @param {number|null|undefined} dependencyMonitorId Client dependency field
++ * @param {string} userID Authenticated user ID
++ * @returns {Promise<number>} Saved monitor ID
++ */
++async function saveMonitorWithDependency(bean, dependencyMonitorId, userID) {
++    return withMonitorDependencyLock(async () => {
++        let current = null;
++        if (bean.id) {
++            current = await R.findOne("monitor", " id = ? ", [bean.id]);
++            assertMonitorAccess(current, userID);
++        }
++        const proposed =
++            dependencyMonitorId === undefined ? (current?.dependency_monitor_id ?? null) : dependencyMonitorId;
++        bean.dependency_monitor_id = await validateMonitorDependency(proposed, bean.id, userID);
++        return R.store(bean);
++    });
++}
++
++module.exports = {
++    assertMonitorAccess,
++    validateMonitorDependency,
++    saveMonitorWithDependency,
++    withMonitorDependencyLock,
++};
+diff --git a/server/server.js b/server/server.js
+index 7b718abe06f236dbf205f2b120d612a6762ca4cf..2f36f48e911a67293793e0a6b0c8da11b151aa4c 100644
+--- a/server/server.js
++++ b/server/server.js
+@@ -17,6 +17,7 @@ import { getRandomInt, isDevEnv, log, sleep } from "../src/util";
+ import { auth, createHeaders, doubleCheckPassword, getDisableAuthSession, getSessionFromHeaders } from "./better-auth";
+ import { createBetterAuthRouter, needSetup } from "./routers/better-auth-router";
+ import { readApiKey } from "./auth";
++import { assertMonitorAccess, saveMonitorWithDependency } from "./monitor-dependency";
+ import { initAdminFromEnv } from "./initial-admin";
+ import { betterAuthSocketHandler } from "./socket-handlers/better-auth-socket-handler";
+ import { loadEnvFile } from "node:process";
+@@ -444,6 +445,10 @@ app.use(function (req, res, next) {
+             try {
+                 checkLogin(socket);
+                 let bean = R.dispense("monitor");
++                const dependencyMonitorId = monitor.dependencyMonitorId;
++                // Dependency writes must go through validation, including imported payloads.
++                delete monitor.dependencyMonitorId;
++                delete monitor.dependency_monitor_id;
+ 
+                 let notificationIDList = monitor.notificationIDList;
+                 delete monitor.notificationIDList;
+@@ -491,7 +496,7 @@ app.use(function (req, res, next) {
+ 
+                 bean.validate();
+ 
+-                await R.store(bean);
++                await saveMonitorWithDependency(bean, dependencyMonitorId, socket.userID);
+ 
+                 await updateMonitorNotification(bean.id, notificationIDList);
+ 
+@@ -526,6 +531,7 @@ app.use(function (req, res, next) {
+                 checkLogin(socket);
+ 
+                 let bean = await R.findOne("monitor", " id = ? ", [monitor.id]);
++                assertMonitorAccess(bean, socket.userID);
+ 
+                 // Check if Parent is Descendant (would cause endless loop)
+                 if (monitor.parent !== null) {
+@@ -672,7 +678,7 @@ app.use(function (req, res, next) {
+ 
+                 bean.validate();
+ 
+-                await R.store(bean);
++                await saveMonitorWithDependency(bean, monitor.dependencyMonitorId, socket.userID);
+ 
+                 if (removeGroupChildren) {
+                     await Monitor.unlinkAllChildren(monitor.id);
+@@ -724,6 +730,7 @@ app.use(function (req, res, next) {
+                 log.info("monitor", `Get Monitor: ${monitorID} User ID: ${socket.userID}`);
+ 
+                 let monitor = await R.findOne("monitor", " id = ? ", [monitorID]);
++                assertMonitorAccess(monitor, socket.userID);
+                 const monitorData = [{ id: monitor.id, active: monitor.active }];
+                 const preloadData = await Monitor.preparePreloadData(monitorData);
+                 callback({
+@@ -865,6 +872,7 @@ app.use(function (req, res, next) {
+ 
+                 // Check if this is a group monitor
+                 const monitor = await R.findOne("monitor", " id = ? ", [monitorID]);
++                assertMonitorAccess(monitor, socket.userID);
+ 
+                 // Log with context about deletion type
+                 if (monitor && monitor.type === "group") {
+@@ -933,6 +941,8 @@ app.use(function (req, res, next) {
+                     msgi18n: true,
+                 });
+                 await server.sendDeleteMonitorFromList(socket, monitorID);
++                // Dependencies of surviving monitors may have been cleared (including recursive deletions).
++                await server.sendMonitorList(socket);
+             } catch (e) {
+                 callback({
+                     ok: false,
+diff --git a/test/backend-test/test-compact-monitor.ts b/test/backend-test/test-compact-monitor.ts
+index 2bc6e5ba63bce61113f0a45fa29dec766175bf1e..25f51f3a4cc922aad037c3fc491691710daaa26c 100644
+--- a/test/backend-test/test-compact-monitor.ts
++++ b/test/backend-test/test-compact-monitor.ts
+@@ -21,6 +21,15 @@ function preload(overrides = {}) {
+ }
+ 
+ describe("toCompactMonitor()", () => {
++    test("includes dependency configuration without affecting active status", () => {
++        const compact = toCompactMonitor(
++            { id: 1, name: "API", type: "http", interval: 60, dependency_monitor_id: 2 },
++            preload()
++        );
++        assert.strictEqual(compact.dependencyMonitorId, 2);
++        assert.strictEqual(compact.active, true);
++    });
++
+     test("keeps the fields the dashboard uses", () => {
+         const monitor = { id: 1, name: "API", type: "http", parent: null, interval: 60, weight: 2000 };
+ 
+@@ -32,6 +41,7 @@ describe("toCompactMonitor()", () => {
+             type: "http",
+             active: true,
+             parent: null,
++            dependencyMonitorId: null,
+             childrenIDs: [2, 3],
+             tags: [{ tag_id: 5, name: "env" }],
+             path: ["Group", "Child"],
+diff --git a/test/backend-test/test-monitor-dependency-socket.ts b/test/backend-test/test-monitor-dependency-socket.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..5efc6e28a50977abacb741b9ea0342410ccac0f5
+--- /dev/null
++++ b/test/backend-test/test-monitor-dependency-socket.ts
+@@ -0,0 +1,226 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import fs from "node:fs";
++import net from "node:net";
++import path from "node:path";
++import { spawn } from "node:child_process";
++import { once } from "node:events";
++import { io, type Socket } from "socket.io-client";
++
++/**
++ * Reserve an available local server port.
++ * @returns {Promise<number>} Port number
++ */
++async function freePort(): Promise<number> {
++    const server = net.createServer();
++    server.listen(0, "127.0.0.1");
++    await once(server, "listening");
++    const port = (server.address() as net.AddressInfo).port;
++    await new Promise<void>((resolve) => server.close(() => resolve()));
++    return port;
++}
++
++/**
++ * Wait for an asynchronous condition, with a bounded timeout.
++ * @param {Function} condition Condition to check
++ * @returns {Promise<void>} Resolves once ready
++ */
++async function waitFor(condition: () => Promise<boolean>) {
++    const deadline = Date.now() + 60000;
++    while (Date.now() < deadline) {
++        if (await condition()) {
++            return;
++        }
++        await new Promise((resolve) => setTimeout(resolve, 200));
++    }
++    throw new Error("Timed out waiting for the dependency test server");
++}
++
++/**
++ * Call a real Socket.IO handler with an acknowledgement timeout.
++ * @param {Socket} socket Connected socket
++ * @param {string} event Event to emit
++ * @param {any[]} args Event arguments
++ * @returns {Promise<any>} Acknowledgement
++ */
++async function call(socket: Socket, event: string, ...args: any[]): Promise<any> {
++    return socket.timeout(10000).emitWithAck(event, ...args);
++}
++
++/**
++ * A complete legacy add-monitor payload without dependency configuration.
++ * @param {string} name Monitor name
++ * @param {object} extra Additional fields
++ * @returns {object} Monitor payload
++ */
++function payload(name: string, extra = {}) {
++    return {
++        name,
++        type: "manual",
++        manual_status: 1,
++        active: false,
++        parent: null,
++        interval: 20,
++        retryInterval: 20,
++        maxretries: 0,
++        accepted_statuscodes: ["200-299"],
++        kafkaProducerBrokers: [],
++        kafkaProducerSaslOptions: {},
++        rabbitmqNodes: [],
++        conditions: [],
++        notificationIDList: {},
++        ...extra,
++    };
++}
++
++test("Socket.IO monitor dependency lifecycle and independent health checks", { timeout: 120000 }, async (t) => {
++    fs.mkdirSync("data", { recursive: true });
++    const dataDir = fs.mkdtempSync(path.resolve("data/test-dependency-socket-"));
++    const port = await freePort();
++    const baseUrl = `http://127.0.0.1:${port}`;
++    const username = "dependencyadmin";
++    const password = "Kuma-Dependency-Test-8f4Q2xR9p";
++    const child = spawn(process.execPath, ["--import=tsx", "server/server.js"], {
++        env: {
++            ...process.env,
++            DATA_DIR: dataDir,
++            UPTIME_KUMA_PORT: String(port),
++            UPTIME_KUMA_DB_TYPE: "sqlite",
++            UK_INITIAL_ADMIN_USERNAME: username,
++            UK_INITIAL_ADMIN_PASSWORD: password,
++            UPTIME_KUMA_DISABLE_LEAK_PWD_CHECK: "1",
++        },
++        stdio: ["ignore", "pipe", "pipe"],
++    });
++    let output = "";
++    child.stdout.on("data", (data) => {
++        output += data;
++    });
++    child.stderr.on("data", (data) => {
++        output += data;
++    });
++    const sockets: Socket[] = [];
++    t.after(async () => {
++        for (const socket of sockets) {
++            socket.disconnect();
++        }
++        if (child.exitCode === null) {
++            child.kill();
++            await once(child, "exit");
++        }
++        fs.rmSync(dataDir, { recursive: true, force: true });
++    });
++
++    try {
++        await waitFor(async () => {
++            try {
++                return (await fetch(`${baseUrl}/api/entry-page`)).ok;
++            } catch {
++                return false;
++            }
++        });
++        const login = await fetch(`${baseUrl}/api/auth/sign-in/username`, {
++            method: "POST",
++            headers: { "content-type": "application/json" },
++            body: JSON.stringify({ username, password }),
++        });
++        assert.equal(login.status, 200);
++        const cookie = login.headers
++            .getSetCookie()
++            .map((value) => value.split(";")[0])
++            .join("; ");
++        const socket = io(baseUrl, { extraHeaders: { cookie }, reconnection: false });
++        sockets.push(socket);
++        await once(socket, "session");
++
++        const add = async (monitor) => {
++            const result = await call(socket, "add", monitor);
++            assert.equal(result.ok, true, result.msg);
++            return result.monitorID;
++        };
++        const get = async (id) => {
++            const result = await call(socket, "getMonitor", id);
++            assert.equal(result.ok, true, result.msg);
++            return result.monitor;
++        };
++        const edit = async (id, fields) => call(socket, "editMonitor", { ...(await get(id)), ...fields });
++        const root = await add(payload("Root"));
++        assert.equal((await get(root)).dependencyMonitorId, null);
++        const middle = await add(payload("Middle", { dependencyMonitorId: root }));
++        const leaf = await add(payload("Leaf", { dependencyMonitorId: middle }));
++        assert.equal((await get(leaf)).dependencyMonitorId, middle);
++
++        for (const value of ["1", 0, -1, 1.5, {}, [], 9999999]) {
++            const result = await call(socket, "add", payload("Invalid", { dependencyMonitorId: value }));
++            assert.equal(result.ok, false);
++        }
++        assert.equal((await edit(root, { dependencyMonitorId: root })).ok, false);
++        assert.equal((await edit(root, { dependencyMonitorId: leaf })).ok, false);
++        assert.equal((await get(root)).dependencyMonitorId, null);
++
++        // A pre-feature client gets and saves the other fields without knowing about dependencies.
++        const oldClient = await get(leaf);
++        delete oldClient.dependencyMonitorId;
++        oldClient.name = "Legacy edit";
++        assert.equal((await call(socket, "editMonitor", oldClient)).ok, true);
++        assert.equal((await get(leaf)).dependencyMonitorId, middle);
++        assert.equal((await edit(leaf, { dependencyMonitorId: null })).ok, true);
++        assert.equal((await get(leaf)).dependencyMonitorId, null);
++
++        // Neither import aliases nor raw database fields bypass dependency validation.
++        const raw = await add(payload("Raw import", { dependency_monitor_id: 9999999 }));
++        assert.equal((await get(raw)).dependencyMonitorId, null);
++        assert.equal((await edit(raw, { dependency_monitor_id: 9999999 })).ok, true);
++        assert.equal((await get(raw)).dependencyMonitorId, null);
++
++        const opposing = await Promise.all([
++            edit(root, { dependencyMonitorId: leaf }),
++            edit(leaf, { dependencyMonitorId: root }),
++        ]);
++        assert.equal(opposing.filter((result) => result.ok).length, 1);
++        await edit(root, { dependencyMonitorId: null });
++        await edit(leaf, { dependencyMonitorId: middle });
++
++        // Both monitors run checks; the dependency being DOWN cannot change the child's actual UP status.
++        const down = await add(payload("Down dependency", { active: true, manual_status: 0 }));
++        const up = await add(payload("Independent child", { active: true, dependencyMonitorId: down }));
++        await waitFor(async () => {
++            const downBeats = await call(socket, "getMonitorBeats", down, 24);
++            const upBeats = await call(socket, "getMonitorBeats", up, 24);
++            return downBeats.data?.some((beat) => beat.status === 0) && upBeats.data?.some((beat) => beat.status === 1);
++        });
++        assert.equal((await get(up)).active, true);
++
++        // The legacy delete signature still works and survivors receive their cleared dependency.
++        const updatedList = once(socket, "monitorList");
++        assert.equal((await call(socket, "deleteMonitor", middle)).ok, true);
++        const [list] = await updatedList;
++        assert.equal(list[leaf].dependencyMonitorId, null);
++        assert.equal((await get(leaf)).dependencyMonitorId, null);
++        assert.equal((await get(root)).dependencyMonitorId, null);
++
++        const group = await add(payload("Group", { type: "group" }));
++        const childID = await add(payload("Grouped monitor", { parent: group }));
++        await edit(raw, { dependencyMonitorId: childID });
++        assert.equal((await call(socket, "deleteMonitor", group, true)).ok, true);
++        assert.equal((await get(raw)).dependencyMonitorId, null);
++        assert.equal((await call(socket, "getMonitor", childID)).ok, false);
++
++        const anonymous = io(baseUrl, { reconnection: false });
++        sockets.push(anonymous);
++        await once(anonymous, "info");
++        for (const [event, args] of [
++            ["add", [payload("Unauthorized", { dependencyMonitorId: root })]],
++            ["editMonitor", [{ ...(await get(root)), dependencyMonitorId: leaf }]],
++            ["getMonitor", [root]],
++            ["deleteMonitor", [root]],
++        ] as [string, any[]][]) {
++            const result = await call(anonymous, event, ...args);
++            assert.equal(result.ok, false);
++            assert.match(result.msg, /not logged in/);
++        }
++    } catch (error) {
++        t.diagnostic(output);
++        throw error;
++    }
++});
+diff --git a/test/backend-test/test-monitor-dependency.ts b/test/backend-test/test-monitor-dependency.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..89f749bd49cbb5e964091e550088a861e1748e79
+--- /dev/null
++++ b/test/backend-test/test-monitor-dependency.ts
+@@ -0,0 +1,202 @@
++import { before, after, beforeEach, describe, test } from "node:test";
++import assert from "node:assert/strict";
++import { createRequire } from "node:module";
++
++const require = createRequire(import.meta.url);
++const knex = require("knex");
++const { R } = require("redbean-node");
++const Monitor = require("../../server/model/monitor");
++const { UptimeKumaServer } = require("../../server/uptime-kuma-server");
++const { validateMonitorDependency, saveMonitorWithDependency } = require("../../server/monitor-dependency");
++const migration = require("../../db/knex_migrations/2026-11-05-0000-add-monitor-dependency");
++
++const db = knex({ client: "better-sqlite3", connection: { filename: ":memory:" }, useNullAsDefault: true });
++
++before(async () => {
++    R.setup(db);
++    await db.raw("PRAGMA foreign_keys = ON");
++    await db.schema.createTable("monitor", (table) => {
++        table.increments("id");
++        table.string("name");
++        table.string("user_id");
++        table.string("type");
++        table.integer("parent");
++    });
++    await db("monitor").insert({ id: 1, name: "Before migration", user_id: "alice" });
++    await migration.up(db);
++    assert.equal((await db("monitor").where({ id: 1 }).first()).dependency_monitor_id, null);
++});
++after(async () => db.destroy());
++
++beforeEach(async () => {
++    await db("monitor").update({ dependency_monitor_id: null });
++    await db("monitor").del();
++    await db("monitor").insert([
++        { id: 1, name: "A", user_id: "alice" },
++        { id: 2, name: "B", user_id: "alice" },
++        { id: 3, name: "C", user_id: "alice" },
++        { id: 4, name: "Other user", user_id: "bob" },
++        { id: 5, name: "Legacy", user_id: null },
++    ]);
++});
++
++describe("monitor dependency validation", () => {
++    test("permits a dependency chain and clearing a dependency", async () => {
++        await db("monitor").where({ id: 2 }).update({ dependency_monitor_id: 3 });
++        assert.equal(await validateMonitorDependency(2, 1, "alice"), 2);
++        assert.equal(await validateMonitorDependency(null, 1, "alice"), null);
++        assert.equal(await validateMonitorDependency(5, 1, "alice"), 5);
++        assert.equal(await validateMonitorDependency(4, 1, "alice"), 4);
++    });
++
++    test("rejects malformed IDs without coercion", async () => {
++        for (const value of [
++            undefined,
++            "2",
++            "",
++            0,
++            -1,
++            1.5,
++            NaN,
++            Infinity,
++            Number.MAX_SAFE_INTEGER + 1,
++            true,
++            {},
++            [],
++        ]) {
++            await assert.rejects(validateMonitorDependency(value, 1, "alice"), /Invalid dependency/);
++        }
++    });
++
++    test("rejects nonexistent and unauthorized dependencies", async () => {
++        await assert.rejects(validateMonitorDependency(999, 1, "alice"), /not found or access denied/);
++
++        await assert.rejects(validateMonitorDependency(2, 1, undefined), /access denied/);
++        await db("monitor").where({ id: 2 }).update({ dependency_monitor_id: 4 });
++        assert.equal(await validateMonitorDependency(2, 1, "alice"), 2);
++    });
++
++    test("rejects self references, indirect cycles and preexisting cycles", async () => {
++        await assert.rejects(validateMonitorDependency(1, 1, "alice"), /circular/);
++        await db("monitor").where({ id: 2 }).update({ dependency_monitor_id: 3 });
++        await db("monitor").where({ id: 3 }).update({ dependency_monitor_id: 1 });
++        await assert.rejects(validateMonitorDependency(2, 1, "alice"), /circular/);
++        await db("monitor").where({ id: 3 }).update({ dependency_monitor_id: 2 });
++        await assert.rejects(validateMonitorDependency(2, undefined, "alice"), /circular/);
++    });
++});
++
++describe("saving monitor dependencies", () => {
++    test("shared access permits editing another user's monitor but cannot resurrect a deleted monitor", async () => {
++        const other = await R.findOne("monitor", "id = ?", [4]);
++        await saveMonitorWithDependency(other, 2, "alice");
++        assert.equal((await db("monitor").where({ id: 4 }).first()).dependency_monitor_id, 2);
++        const deleted = await R.findOne("monitor", "id = ?", [1]);
++        await db("monitor").where({ id: 1 }).del();
++        await assert.rejects(saveMonitorWithDependency(deleted, undefined, "alice"), /not found/);
++    });
++
++    test("defaults old add payloads to null and ignores imported raw values", async () => {
++        const bean = R.dispense("monitor");
++        bean.name = "New";
++        bean.user_id = "alice";
++        bean.dependency_monitor_id = 4;
++        await saveMonitorWithDependency(bean, undefined, "alice");
++        assert.equal((await db("monitor").where({ id: bean.id }).first()).dependency_monitor_id, null);
++    });
++
++    test("omitted edit field preserves the stored dependency; null clears it", async () => {
++        await db("monitor").where({ id: 1 }).update({ dependency_monitor_id: 2 });
++        const bean = await R.findOne("monitor", "id = ?", [1]);
++        bean.name = "Renamed";
++        await saveMonitorWithDependency(bean, undefined, "alice");
++        assert.equal((await db("monitor").where({ id: 1 }).first()).dependency_monitor_id, 2);
++        await saveMonitorWithDependency(bean, null, "alice");
++        assert.equal((await db("monitor").where({ id: 1 }).first()).dependency_monitor_id, null);
++    });
++
++    test("invalid edits leave the stored monitor unchanged", async () => {
++        const bean = await R.findOne("monitor", "id = ?", [1]);
++        bean.name = "Should not save";
++        await assert.rejects(saveMonitorWithDependency(bean, 999, "alice"), /not found/);
++        assert.equal((await db("monitor").where({ id: 1 }).first()).name, "A");
++    });
++
++    test("simultaneous opposing edits cannot introduce a cycle, and failures release the lock", async () => {
++        const a = await R.findOne("monitor", "id = ?", [1]);
++        const b = await R.findOne("monitor", "id = ?", [2]);
++        const results = await Promise.allSettled([
++            saveMonitorWithDependency(a, 2, "alice"),
++            saveMonitorWithDependency(b, 1, "alice"),
++        ]);
++        assert.deepEqual(
++            results.map((result) => result.status),
++            ["fulfilled", "rejected"]
++        );
++        await saveMonitorWithDependency(b, 3, "alice");
++        assert.equal((await db("monitor").where({ id: 2 }).first()).dependency_monitor_id, 3);
++    });
++});
++
++describe("dependency deletion", () => {
++    test("explicit cleanup works when SQLite foreign keys are disabled", async (t) => {
++        await db("monitor").where({ id: 1 }).update({ dependency_monitor_id: 2 });
++        t.mock.method(UptimeKumaServer, "getInstance", () => ({ monitorList: {} }));
++        await db.raw("PRAGMA foreign_keys = OFF");
++        try {
++            await Monitor.deleteMonitor(2);
++            assert.equal((await db("monitor").where({ id: 1 }).first()).dependency_monitor_id, null);
++        } finally {
++            await db.raw("PRAGMA foreign_keys = ON");
++        }
++    });
++
++    test("deletion clears persisted and running references; stale edits do not restore them", async (t) => {
++        await db("monitor").whereIn("id", [1, 3]).update({ dependency_monitor_id: 2 });
++        const staleBean = await R.findOne("monitor", "id = ?", [1]);
++        let stopped = false;
++        const running = {
++            1: { dependency_monitor_id: 2 },
++            2: {
++                stop: async () => {
++                    stopped = true;
++                },
++            },
++            3: { dependency_monitor_id: 2 },
++        };
++        t.mock.method(UptimeKumaServer, "getInstance", () => ({ monitorList: running }));
++        await Monitor.deleteMonitor("2");
++        assert.equal(stopped, true);
++        assert.equal(running[2], undefined);
++        assert.equal(running[1].dependency_monitor_id, null);
++        assert.equal(running[3].dependency_monitor_id, null);
++        assert.equal((await db("monitor").where({ id: 3 }).first()).dependency_monitor_id, null);
++        await saveMonitorWithDependency(staleBean, undefined, "alice");
++        assert.equal((await db("monitor").where({ id: 1 }).first()).dependency_monitor_id, null);
++        await assert.rejects(saveMonitorWithDependency(staleBean, 2, "alice"), /not found/);
++    });
++
++    test("recursive group deletion clears dependencies of surviving monitors", async (t) => {
++        await db("monitor").where({ id: 2 }).update({ type: "group" });
++        await db("monitor").where({ id: 3 }).update({ parent: 2 });
++        await db("monitor").where({ id: 1 }).update({ dependency_monitor_id: 3 });
++        t.mock.method(UptimeKumaServer, "getInstance", () => ({ monitorList: {} }));
++        await Monitor.deleteMonitorRecursively(2);
++        assert.equal(await db("monitor").where({ id: 3 }).first(), undefined);
++        assert.equal((await db("monitor").where({ id: 1 }).first()).dependency_monitor_id, null);
++    });
++
++    test("foreign key clears references even for direct database deletions", async () => {
++        await db("monitor").where({ id: 1 }).update({ dependency_monitor_id: 2 });
++        await db("monitor").where({ id: 2 }).del();
++        assert.equal((await db("monitor").where({ id: 1 }).first()).dependency_monitor_id, null);
++    });
++});
++
++test("dependency migration rolls back and can be reapplied without losing monitors", async () => {
++    await migration.down(db);
++    assert.equal(await db.schema.hasColumn("monitor", "dependency_monitor_id"), false);
++    assert.equal((await db("monitor").where({ id: 1 }).first()).name, "A");
++    await migration.up(db);
++    assert.equal((await db("monitor").where({ id: 1 }).first()).dependency_monitor_id, null);
++});
+diff --git a/test/backend-test/test-monitor.ts b/test/backend-test/test-monitor.ts
+index 8c749d8f3779b39ec0e1eed94e054b0f95deef2a..094bb822f29bf5096e55df4cfd4e42aedb553b5f 100644
+--- a/test/backend-test/test-monitor.ts
++++ b/test/backend-test/test-monitor.ts
+@@ -44,6 +44,16 @@ function preloadFor(id) {
+ }
+ 
+ describe("Monitor", () => {
++    test("serializes dependency IDs independently of monitor status", () => {
++        for (const dependency of [undefined, null, 2]) {
++            const monitor = monitorWith({ id: 1, dependency_monitor_id: dependency });
++            const json = monitor.toJSON(preloadFor(1));
++            assert.strictEqual(json.dependencyMonitorId, dependency ?? null);
++            assert.strictEqual(json.active, true);
++            assert.strictEqual(json.forceInactive, false);
++        }
++    });
++
+     describe("getUrl()", () => {
+         test("returns a URL object for a valid url", () => {
+             const monitor = monitorWith({ url: "https://example.com/path?q=1" });
+diff --git a/test/backend-test/test-server-config.ts b/test/backend-test/test-server-config.ts
+index 6000eec150ba7fad357883be11c000fd977fc18f..34dfa877eaf12b505ae83963be7715c10cd4736a 100644
+--- a/test/backend-test/test-server-config.ts
++++ b/test/backend-test/test-server-config.ts
+@@ -66,6 +66,7 @@ describe("getMonitorJSONList()", () => {
+             type: "http",
+             active: true,
+             parent: null,
++            dependencyMonitorId: null,
+             childrenIDs: [],
+             tags: [],
+             path: ["Group"],
+diff --git a/test/fixtures/monitor-columns.json b/test/fixtures/monitor-columns.json
+index 84445305b5c9d14f81c887020b037f4187e89928..388e85822b7942cedb91d5df925301a5078a6d48 100644
+--- a/test/fixtures/monitor-columns.json
++++ b/test/fixtures/monitor-columns.json
+@@ -14,6 +14,7 @@
+     "created_date",
+     "database_connection_string",
+     "database_query",
++    "dependency_monitor_id",
+     "description",
+     "dns_last_result",
+     "dns_resolve_server",

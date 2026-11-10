@@ -1,0 +1,909 @@
+diff --git a/docs/dependency-ui.md b/docs/dependency-ui.md
+new file mode 100644
+index 0000000000000000000000000000000000000000..e590abc138759b0bdb88636067ca0ccdc3d8944b
+--- /dev/null
++++ b/docs/dependency-ui.md
+@@ -0,0 +1,41 @@
++# Monitor dependency UI (Step 4)
++
++The authenticated add/edit monitor form has one **Monitor Dependency** selector.
++**None** sends `dependencyMonitorId: null`. Existing selections are read from
++`getMonitor`; option values remain numeric IDs. The compact monitor list supplies
++the graph used to exclude self, descendants, existing cycles and missing chains.
++Paused monitors remain selectable, matching backend semantics. Validation on save
++remains authoritative for permissions, concurrent changes and cycle prevention.
++If a saved selection cannot be found in the current options, a disabled current
++selection explains the situation without silently clearing the saved value.
++
++A shared suppression label appears in the monitor list and monitor details, and
++the dashboard includes a current suppression summary. The label has an accessible
++explanation and a tooltip available on hover or keyboard focus (Escape dismisses
++it). It uses the existing warning palette, wraps on small screens and names the
++failed ancestor, including transitive dependencies.
++
++Only live `heartbeat` events with backend `dependencyNotification.suppressed ===
++true`, `reason: ancestor-down`, and a matching active ancestor can establish a
++label for a DOWN child. An already-known non-DOWN blocker rejects a delayed
++suppression decision. DOWN alone, unknown/retrying dependencies and historical
++heartbeat responses never establish suppression. A subsequent child or ancestor
++heartbeat (including a history response replacing the displayed latest beat with a different observation)
++invalidates the old observation; a fresh backend child decision can
++establish it again. Configuration changes, deletion, logout and disconnection
++clear cached observations immediately. Browser offline events also clear them,
++without waiting for the Socket.IO heartbeat timeout. Consequently, after loading/reconnecting,
++or after an ancestor update, an indicator may be absent until the next child
++heartbeat. Absence means no current confirmation, not a guarantee of delivery.
++This deliberately conservative policy avoids presenting stale suppression as fact.
++
++No heartbeat status, history, uptime, dashboard health counter or notification
++behavior is changed. Public status pages, public badges and historical event
++status components retain their existing semantics and do not expose dependency
++names or metadata. New text is in `src/lang/en.json`, using the project's English
++fallback for locales that do not yet have translations.
++
++Coverage includes graph validation and live-observation invalidation unit tests,
++and browser tests for saving/clearing, self/cycle filtering, real push heartbeat
++suppression, unchanged DOWN status, dashboard/list/details labels, reconnect,
++keyboard explanations and mobile/dark presentation.
+diff --git a/src/components/DependencySuppression.vue b/src/components/DependencySuppression.vue
+new file mode 100644
+index 0000000000000000000000000000000000000000..1733a51101eec7175763486ad182792390f68d0b
+--- /dev/null
++++ b/src/components/DependencySuppression.vue
+@@ -0,0 +1,87 @@
++<template>
++    <span v-if="blocker" class="dependency-suppression">
++        <span
++            class="badge rounded-pill bg-warning text-dark suppression-label"
++            role="note"
++            tabindex="0"
++            :aria-label="explanation"
++            :title="explanation"
++            @mouseenter="showTooltip"
++            @mouseleave="visible = false"
++            @focus="showTooltip"
++            @blur="visible = false"
++            @keydown.esc="visible = false"
++        >
++            {{ $t("dependencyAlertsSuppressed") }}
++        </span>
++        <Tooltip v-if="visible" :content="{}" :x="x" :y="y">
++            <span role="tooltip" class="suppression-explanation">{{ explanation }}</span>
++        </Tooltip>
++    </span>
++</template>
++
++<script>
++import Tooltip from "./Tooltip.vue";
++
++export default {
++    components: { Tooltip },
++    props: {
++        /** Authenticated monitor ID; never used on public status pages. */
++        monitorId: { type: Number, required: true },
++    },
++    data() {
++        return { visible: false, x: 0, y: 0 };
++    },
++    computed: {
++        blocker() {
++            if (!this.$root.socket.connected) {
++                return null;
++            }
++            const observation = this.$root.dependencyObservations[this.monitorId];
++            return observation ? this.$root.monitorList[observation.blockerId] : null;
++        },
++        explanation() {
++            return this.$t("dependencySuppressionExplanation", { monitor: this.blocker?.name });
++        },
++    },
++    methods: {
++        /**
++         * Position the shared tooltip within the viewport for hover and keyboard focus.
++         * @param {Event} event Focus or mouse event
++         * @returns {void}
++         */
++        showTooltip(event) {
++            const rect = event.currentTarget.getBoundingClientRect();
++            this.x = Math.max(150, Math.min(window.innerWidth - 150, rect.left + rect.width / 2));
++            this.y = rect.bottom + 8;
++            this.visible = true;
++        },
++    },
++};
++</script>
++
++<style scoped>
++.dependency-suppression {
++    display: inline-block;
++    max-width: 100%;
++    white-space: normal;
++}
++
++.suppression-label {
++    white-space: normal;
++    text-align: start;
++}
++
++.suppression-label:focus-visible {
++    outline: 2px solid currentcolor;
++    outline-offset: 2px;
++}
++
++.suppression-explanation {
++    display: block;
++    max-width: min(260px, calc(100vw - 48px));
++    color: #f3f4f6;
++    white-space: normal;
++    overflow-wrap: anywhere;
++}
++</style>
+diff --git a/src/components/MonitorListItem.vue b/src/components/MonitorListItem.vue
+index a0867ef2b643f8b9edc9114ca759b5dade580cbe..eb3f77aec07e29de2e59b6eff05154aba393770c 100644
+--- a/src/components/MonitorListItem.vue
++++ b/src/components/MonitorListItem.vue
+@@ -43,6 +43,7 @@
+                             </span>
+                             <div class="flex-fill text-truncate" style="min-width: 0">
+                                 <div class="text-truncate">{{ monitor.name }}</div>
++                                <DependencySuppression :monitor-id="monitor.id" />
+                                 <div v-if="monitor.tags.length > 0" class="tags gap-1">
+                                     <Tag
+                                         v-for="tag in monitor.tags"
+@@ -89,6 +90,7 @@
+ </template>
+ 
+ <script>
++import DependencySuppression from "./DependencySuppression.vue";
+ import HeartbeatBar from "../components/HeartbeatBar.vue";
+ import Tag from "../components/Tag.vue";
+ import Uptime from "../components/Uptime.vue";
+@@ -97,6 +99,7 @@ import { getMonitorRelativeURL } from "../util.ts";
+ export default {
+     name: "MonitorListItem",
+     components: {
++        DependencySuppression,
+         Uptime,
+         HeartbeatBar,
+         Tag,
+diff --git a/src/lang/en.json b/src/lang/en.json
+index 814b0fb551256324b464aed787990c9ce9982da7..951c099fee5d00ce0a6b50cb29f54375f1ed2efd 100644
+--- a/src/lang/en.json
++++ b/src/lang/en.json
+@@ -1647,5 +1647,10 @@
+     "msGraphConsent": "consent",
+     "msGraphRbac": "RBAC in Exchange Online",
+     "msGraphClientSecretDescription": "Learn how to {clientSecret} for your application registration.",
+-    "msGraphClientSecretLink": "create a client secret"
++    "msGraphClientSecretLink": "create a client secret",
++    "Monitor Dependency": "Monitor Dependency",
++    "dependencyMonitorHelp": "Suppress failure alerts when this dependency or one of its dependencies is down. Health checks and monitor status are unchanged.",
++    "dependencySelectionUnavailable": "Current dependency unavailable. Select another monitor or None.",
++    "dependencyAlertsSuppressed": "Alerts suppressed",
++    "dependencySuppressionExplanation": "Failure alerts suppressed because {monitor} is down. Health checks and monitor status are unchanged."
+ }
+diff --git a/src/mixins/socket.js b/src/mixins/socket.js
+index 98c8feba8d8cc118ca1e00a76306c919116fc8b4..c69ade9ffa8a3f76828d2b301d0d472d7aac8f1a 100644
+--- a/src/mixins/socket.js
++++ b/src/mixins/socket.js
+@@ -1,3 +1,4 @@
++import { invalidateDependencyHistory, recordDependencyObservation } from "../monitor-dependency";
+ import { markRaw } from "vue";
+ import { io } from "socket.io-client";
+ import { useToast } from "vue-toastification";
+@@ -43,6 +44,7 @@ export default {
+             monitorList: {},
+             monitorTypeList: {},
+             maintenanceList: {},
++            dependencyObservations: {},
+             heartbeatList: {},
+             // Kept in sync incrementally by the heartbeat handlers. As computed values they
+             // were rebuilt over all monitors on every beat (thousands of monitors = hot loop)
+@@ -87,9 +89,22 @@ export default {
+ 
+     created() {
+         this.initSocketIO();
++        window.addEventListener("offline", this.clearDependencyObservations);
++    },
++
++    beforeUnmount() {
++        window.removeEventListener("offline", this.clearDependencyObservations);
+     },
+ 
+     methods: {
++        /**
++         * Drop live suppression claims as soon as the browser goes offline.
++         * @returns {void}
++         */
++        clearDependencyObservations() {
++            this.dependencyObservations = {};
++        },
++
+         /**
+          * Store the newest beat of a monitor and its display status.
+          * Called per beat: must stay O(1), thousands of monitors beat every minute.
+@@ -183,6 +198,7 @@ export default {
+             });
+ 
+             socket.on("monitorList", (data) => {
++                this.dependencyObservations = {};
+                 this.assignMonitorUrlParser(data);
+                 this.monitorList = data;
+                 this.monitorListLoaded = true;
+@@ -202,6 +218,7 @@ export default {
+             });
+ 
+             socket.on("updateMonitorIntoList", (data) => {
++                this.dependencyObservations = {};
+                 this.assignMonitorUrlParser(data);
+                 Object.entries(data).forEach(([monitorID, updatedMonitor]) => {
+                     this.monitorList[monitorID] = updatedMonitor;
+@@ -209,6 +226,7 @@ export default {
+             });
+ 
+             socket.on("deleteMonitorFromList", (monitorID) => {
++                this.dependencyObservations = {};
+                 if (this.monitorList[monitorID]) {
+                     delete this.monitorList[monitorID];
+                 }
+@@ -250,6 +268,14 @@ export default {
+             });
+ 
+             socket.on("heartbeat", (data) => {
++                if (navigator.onLine) {
++                    recordDependencyObservation(
++                        this.dependencyObservations,
++                        this.monitorList,
++                        data,
++                        this.lastHeartbeatList
++                    );
++                }
+                 if (!(data.monitorID in this.heartbeatList)) {
+                     this.heartbeatList[data.monitorID] = [];
+                 }
+@@ -289,6 +315,12 @@ export default {
+                     this.heartbeatList[monitorID] = data.concat(this.heartbeatList[monitorID]);
+                 }
+                 if (data.length > 0) {
++                    invalidateDependencyHistory(
++                        this.dependencyObservations,
++                        Number(monitorID),
++                        this.lastHeartbeatList[monitorID],
++                        data[data.length - 1]
++                    );
+                     this.updateLastBeat(monitorID, data[data.length - 1]);
+                 }
+             });
+@@ -298,6 +330,12 @@ export default {
+                     const beats = data[monitorID];
+                     applyLatestBeats(this.heartbeatList, monitorID, beats);
+                     if (beats.length > 0) {
++                        invalidateDependencyHistory(
++                            this.dependencyObservations,
++                            Number(monitorID),
++                            this.lastHeartbeatList[monitorID],
++                            beats[beats.length - 1]
++                        );
+                         this.updateLastBeat(monitorID, beats[beats.length - 1]);
+                     }
+                 }
+@@ -329,6 +367,7 @@ export default {
+             });
+ 
+             socket.on("connect_error", (err) => {
++                this.dependencyObservations = {};
+                 console.error(`Failed to connect to the backend. Socket.io connect_error: ${err.message}`);
+                 this.connectionErrorMsg = `${this.$t("Cannot connect to the socket server.")} [${err}] ${this.$t("Reconnecting...")}`;
+                 this.showReverseProxyGuide = true;
+@@ -337,6 +376,7 @@ export default {
+             });
+ 
+             socket.on("disconnect", () => {
++                this.dependencyObservations = {};
+                 console.log("disconnect");
+                 // As we are using cookie based auth, we have to reconnect the socket
+                 // avoid noise by add a delay
+@@ -623,6 +663,7 @@ export default {
+          */
+         clearData() {
+             console.log("reset heartbeat list");
++            this.dependencyObservations = {};
+             this.heartbeatList = {};
+             this.lastHeartbeatList = {};
+             this.statusList = {};
+diff --git a/src/monitor-dependency.ts b/src/monitor-dependency.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..3f7d4085147c4445a7516146c51832ca0ce3227c
+--- /dev/null
++++ b/src/monitor-dependency.ts
+@@ -0,0 +1,130 @@
++import { DOWN } from "./util";
++
++/** Minimal authenticated monitor configuration used by dependency UI. */
++export interface DependencyMonitor {
++    id: number;
++    name: string;
++    active?: boolean | number;
++    dependencyMonitorId?: number | null;
++}
++
++/**
++ * Walk a proposed chain, rejecting self references, existing cycles and missing monitors.
++ * The server still validates ownership and the graph when saving.
++ * @param monitors Authenticated monitor list
++ * @param candidate Proposed dependency
++ * @param monitorId Monitor being edited
++ * @returns Ancestor IDs, or null for an invalid chain
++ */
++export function dependencyChain(
++    monitors: Record<number, DependencyMonitor>,
++    candidate: number | null | undefined,
++    monitorId?: number
++): number[] | null {
++    const chain: number[] = [];
++    const visited = new Set(monitorId ? [Number(monitorId)] : []);
++    let id = candidate;
++    while (id != null) {
++        if (visited.has(Number(id)) || !monitors[id]) {
++            return null;
++        }
++        visited.add(Number(id));
++        chain.push(Number(id));
++        id = monitors[id].dependencyMonitorId;
++    }
++    return chain;
++}
++
++export interface SuppressionObservation {
++    blockerId: number;
++    ancestors: number[];
++}
++
++export interface DependencyBeat {
++    monitorID: number;
++    status: number;
++    dependencyNotification?: {
++        suppressed?: boolean;
++        reason?: string;
++        suppressedByMonitorId?: number;
++    };
++}
++
++/**
++ * Invalidate a decision when its child or any ancestor receives another observation,
++ * including a historical response that replaces the UI's latest heartbeat.
++ * @param observations Cached live decisions
++ * @param monitorId Monitor whose displayed observation is changing
++ * @returns {void}
++ */
++export function invalidateDependencyObservation(
++    observations: Record<number, SuppressionObservation>,
++    monitorId: number
++): void {
++    for (const [id, observation] of Object.entries(observations)) {
++        if (Number(id) === monitorId || observation.ancestors.includes(monitorId)) {
++            delete observations[Number(id)];
++        }
++    }
++}
++
++interface StoredDependencyBeat {
++    id?: number;
++    status?: number;
++}
++
++/**
++ * A history response may replace the UI's latest beat. Preserve confirmation only
++ * when it is the same stored observation, never create confirmation from history.
++ * @param observations Cached live decisions
++ * @param monitorId Monitor receiving history
++ * @param previous Previously displayed beat
++ * @param next Beat the history handler will display
++ * @returns {void}
++ */
++export function invalidateDependencyHistory(
++    observations: Record<number, SuppressionObservation>,
++    monitorId: number,
++    previous: StoredDependencyBeat | undefined,
++    next: StoredDependencyBeat
++): void {
++    if (previous?.id == null || previous.id !== next.id || previous.status !== next.status) {
++        invalidateDependencyObservation(observations, monitorId);
++    }
++}
++
++/**
++ * Keep only live backend-confirmed suppression. Any ancestor observation invalidates
++ * the old decision until the child checks again. History must never call this.
++ * @param observations Live suppression observations (mutated in place)
++ * @param monitors Current authenticated configuration
++ * @param beat Live heartbeat event
++ * @param latestBeats Latest known observations, to reject a delayed decision after recovery
++ * @returns {void}
++ */
++export function recordDependencyObservation(
++    observations: Record<number, SuppressionObservation>,
++    monitors: Record<number, DependencyMonitor>,
++    beat: DependencyBeat,
++    latestBeats: Record<number, { status: number }> = {}
++): void {
++    invalidateDependencyObservation(observations, Number(beat.monitorID));
++    const monitor = monitors[beat.monitorID];
++    const metadata = beat.dependencyNotification;
++    if (
++        !monitor?.active ||
++        beat.status !== DOWN ||
++        metadata?.suppressed !== true ||
++        metadata.reason !== "ancestor-down"
++    ) {
++        return;
++    }
++    const ancestors = dependencyChain(monitors, monitor.dependencyMonitorId, monitor.id);
++    const blockerId = Number(metadata.suppressedByMonitorId);
++    if (latestBeats[blockerId] && latestBeats[blockerId].status !== DOWN) {
++        return;
++    }
++    if (ancestors?.includes(blockerId) && monitors[blockerId]?.active) {
++        observations[beat.monitorID] = { blockerId, ancestors };
++    }
++}
+diff --git a/src/pages/DashboardHome.vue b/src/pages/DashboardHome.vue
+index 344d4c2541f6c11ce954abfe232e5481f41e1622..14454fbdda3edaaff6b3f50961ab14387567032b 100644
+--- a/src/pages/DashboardHome.vue
++++ b/src/pages/DashboardHome.vue
+@@ -36,6 +36,16 @@
+                 </div>
+             </div>
+ 
++            <div v-if="suppressedMonitors.length" class="shadow-box big-padding mb-3">
++                <h2 class="h5">{{ $t("dependencyAlertsSuppressed") }}</h2>
++                <ul class="mb-0">
++                    <li v-for="monitor in suppressedMonitors" :key="monitor.id" class="mb-2">
++                        <router-link :to="`/dashboard/${monitor.id}`">{{ monitor.name }}</router-link>
++                        <DependencySuppression :monitor-id="monitor.id" class="ms-2" />
++                    </li>
++                </ul>
++            </div>
++
+             <div class="shadow-box table-shadow-box table-wrapper">
+                 <div class="mb-3 text-end">
+                     <button
+@@ -113,6 +123,7 @@
+ </template>
+ 
+ <script>
++import DependencySuppression from "../components/DependencySuppression.vue";
+ import Status from "../components/Status.vue";
+ import Datetime from "../components/Datetime.vue";
+ import Pagination from "v-pagination-3";
+@@ -120,6 +131,7 @@ import Confirm from "../components/Confirm.vue";
+ 
+ export default {
+     components: {
++        DependencySuppression,
+         Datetime,
+         Status,
+         Pagination,
+@@ -146,6 +158,15 @@ export default {
+         };
+     },
+     computed: {
++        suppressedMonitors() {
++            if (!this.$root.socket.connected) {
++                return [];
++            }
++            return Object.keys(this.$root.dependencyObservations)
++                .map((id) => this.$root.monitorList[id])
++                .filter(Boolean);
++        },
++
+         showGroupColumn() {
+             return Object.values(this.$root.monitorList).some((m) => m.parent != null);
+         },
+diff --git a/src/pages/Details.vue b/src/pages/Details.vue
+index 3a03f8c1fa87ee9cf4571e5cd77dc1c01ab3ce73..2eff9bc7ec9c1faab48c2037a90c60cd0a614680 100644
+--- a/src/pages/Details.vue
++++ b/src/pages/Details.vue
+@@ -11,6 +11,7 @@
+                     <div>{{ monitor.id }}</div>
+                 </div>
+             </h1>
++            <DependencySuppression :key="monitor.id" :monitor-id="monitor.id" class="mb-3" />
+             <!-- eslint-disable-next-line vue/no-v-html-->
+             <p v-if="monitor.description" v-html="descriptionHTML"></p>
+             <div class="d-flex">
+@@ -437,6 +438,7 @@
+ </template>
+ 
+ <script>
++import DependencySuppression from "../components/DependencySuppression.vue";
+ import { defineAsyncComponent } from "vue";
+ import { useToast } from "vue-toastification";
+ const toast = useToast();
+@@ -465,6 +467,7 @@ import ScreenshotDialog from "../components/ScreenshotDialog.vue";
+ 
+ export default {
+     components: {
++        DependencySuppression,
+         Uptime,
+         CountUp,
+         Datetime,
+diff --git a/src/pages/EditMonitor.vue b/src/pages/EditMonitor.vue
+index a2c22d86f539c56724fed9612d836174cd9271dc..a4f433579525dd7a1437c116eb1d546c1265c42c 100644
+--- a/src/pages/EditMonitor.vue
++++ b/src/pages/EditMonitor.vue
+@@ -2197,6 +2197,37 @@
+                                 </div>
+                             </div>
+ 
++                            <div class="my-3">
++                                <label for="dependencyMonitorSelector" class="form-label">
++                                    {{ $t("Monitor Dependency") }}
++                                </label>
++                                <select
++                                    id="dependencyMonitorSelector"
++                                    v-model="monitor.dependencyMonitorId"
++                                    class="form-select"
++                                    aria-describedby="dependencyMonitorHelp"
++                                >
++                                    <option :value="null">{{ $t("None") }}</option>
++                                    <option
++                                        v-if="dependencySelectionUnavailable"
++                                        :value="monitor.dependencyMonitorId"
++                                        disabled
++                                    >
++                                        {{ $t("dependencySelectionUnavailable") }}
++                                    </option>
++                                    <option
++                                        v-for="candidate in dependencyCandidates"
++                                        :key="candidate.id"
++                                        :value="candidate.id"
++                                    >
++                                        {{ candidate.name }}
++                                    </option>
++                                </select>
++                                <div id="dependencyMonitorHelp" class="form-text">
++                                    {{ $t("dependencyMonitorHelp") }}
++                                </div>
++                            </div>
++
+                             <!-- Parent Monitor -->
+                             <div class="my-3">
+                                 <label for="monitorGroupSelector" class="form-label">{{ $t("Monitor Group") }}</label>
+@@ -3263,6 +3294,7 @@
+ 
+ <script>
+ import VueMultiselect from "vue-multiselect";
++import { dependencyChain } from "../monitor-dependency";
+ import { useToast } from "vue-toastification";
+ import ActionSelect from "../components/ActionSelect.vue";
+ import CopyableInput from "../components/CopyableInput.vue";
+@@ -3306,6 +3338,7 @@ const monitorDefaults = {
+     type: "http",
+     name: "",
+     parent: null,
++    dependencyMonitorId: null,
+     url: defaultValueList.http.url,
+     wsSubprotocol: "",
+     method: "GET",
+@@ -3422,6 +3455,18 @@ export default {
+     },
+ 
+     computed: {
++        dependencyCandidates() {
++            return Object.values(this.$root.monitorList)
++                .filter((candidate) => dependencyChain(this.$root.monitorList, candidate.id, this.monitor.id) !== null)
++                .sort((a, b) => a.name.localeCompare(b.name) || a.id - b.id);
++        },
++        dependencySelectionUnavailable() {
++            return (
++                this.monitor.dependencyMonitorId != null &&
++                !this.dependencyCandidates.some((candidate) => candidate.id === this.monitor.dependencyMonitorId)
++            );
++        },
++
+         timeoutStep() {
+             return this.monitor.type === "ping" ? 1 : 0.1;
+         },
+@@ -4090,7 +4135,7 @@ message HealthCheckResponse {
+                             }
+                         }
+ 
+-                        this.monitor = res.monitor;
++                        this.monitor = { ...res.monitor, dependencyMonitorId: res.monitor.dependencyMonitorId ?? null };
+ 
+                         if (this.isClone) {
+                             /*
+diff --git a/test/e2e/specs/monitor-dependency.spec.js b/test/e2e/specs/monitor-dependency.spec.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..ff29cd61916cf33ab49932c1718e081c08805842
+--- /dev/null
++++ b/test/e2e/specs/monitor-dependency.spec.js
+@@ -0,0 +1,124 @@
++import { expect, test } from "../fixtures";
++import { login, restoreSqliteSnapshot, screenshot } from "../util-test";
++
++/**
++ * Add a push monitor using the real form.
++ * @param {import('@playwright/test').Page} page Browser page
++ * @param {string} name Monitor name
++ * @param {string|null} dependency Dependency ID
++ * @returns {Promise<{id: string, url: string}>} Monitor ID and push endpoint
++ */
++async function addPushMonitor(page, name, dependency = null) {
++    await page.getByRole("link", { name: "Add New Monitor" }).click();
++    await page.getByTestId("monitor-type-select").selectOption("push");
++    await page.getByTestId("friendly-name-input").fill(name);
++    if (dependency) {
++        await page.getByLabel("Monitor Dependency", { exact: true }).selectOption(dependency);
++    }
++    const url = await page.locator("#push-url").inputValue();
++    await page.getByTestId("save-button").click();
++    await page.waitForURL(/\/dashboard\/\d+$/);
++    return { id: page.url().split("/").pop(), url };
++}
++
++/**
++ * Send a real push heartbeat through the backend notification gate.
++ * @param {import('@playwright/test').APIRequestContext} request Request client
++ * @param {string} endpoint Push URL
++ * @param {string} status UP or DOWN status
++ * @returns {Promise<void>}
++ */
++async function push(request, endpoint, status) {
++    const url = new URL(endpoint);
++    url.searchParams.set("status", status);
++    const response = await request.get(url.toString());
++    expect((await response.json()).ok).toBe(true);
++}
++
++test.beforeEach(async ({ page }) => {
++    await restoreSqliteSnapshot();
++    await page.goto("./dashboard");
++    await login(page);
++});
++
++test("persists dependencies, excludes self and cycles, and clears to None", async ({ page }) => {
++    const gateway = await addPushMonitor(page, "Dependency Gateway");
++    const service = await addPushMonitor(page, "Dependent Service", gateway.id);
++    await page.getByRole("link", { name: "Edit", exact: true }).click();
++    const selector = page.getByLabel("Monitor Dependency", { exact: true });
++    await expect(selector).toHaveValue(gateway.id);
++    await expect(selector.locator(`option[value="${service.id}"]`)).toHaveCount(0);
++    await page.goto(`./edit/${gateway.id}`);
++    await expect(page.getByTestId("friendly-name-input")).toHaveValue("Dependency Gateway");
++    await expect(selector).toHaveValue("None");
++    await expect(selector.locator(`option[value="${gateway.id}"]`)).toHaveCount(0);
++    await expect(selector.locator(`option[value="${service.id}"]`)).toHaveCount(0);
++    await page.goto(`./edit/${service.id}`);
++    await expect(page.getByTestId("friendly-name-input")).toHaveValue("Dependent Service");
++    await expect(selector).toHaveValue(gateway.id);
++    await selector.selectOption({ label: "None" });
++    await page.getByTestId("save-button").click();
++    await expect(page.getByText("Saved.", { exact: true })).toBeVisible();
++    await page.reload();
++    await expect(selector).toHaveValue("None");
++});
++
++test("shows backend suppression while preserving DOWN, clears stale state and supports keyboard/mobile/dark mode", async ({
++    page,
++    request,
++}, testInfo) => {
++    const gateway = await addPushMonitor(page, "Dependency Gateway");
++    const service = await addPushMonitor(page, "Dependent Service", gateway.id);
++    const detailsIndicator = page
++        .locator(".dependency-suppression")
++        .filter({ has: page.locator(".suppression-label") });
++    await expect(detailsIndicator).toHaveCount(0);
++    await push(request, gateway.url, "down");
++    await push(request, service.url, "down");
++    await expect(page.getByTestId("monitor-status")).toContainText("Down");
++    const label = page.locator(".suppression-label").last();
++    await expect(label).toBeVisible();
++    await expect(label).toHaveAttribute("aria-label", /Dependency Gateway is down/);
++    await expect(page.getByTestId("monitor-list").locator(".suppression-label")).toHaveCount(1);
++    await label.focus();
++    await expect(page.locator(".suppression-explanation")).toContainText("Dependency Gateway is down");
++    await label.press("Escape");
++    await expect(page.locator(".suppression-explanation")).toHaveCount(0);
++    await page.goto("./dashboard");
++    // History/reconnect has no live metadata; it must not claim current suppression.
++    await expect(page.locator(".suppression-label")).toHaveCount(0);
++    await push(request, service.url, "down");
++    await expect(page.locator(".suppression-label")).toHaveCount(2);
++    await expect(page.locator(".num.text-danger")).toHaveText("2");
++    await expect(page.getByTestId("monitor-list").locator(".suppression-label")).toBeVisible();
++    await screenshot(testInfo, page);
++    await page.screenshot({ path: testInfo.outputPath("dependency-dashboard.png"), animations: "disabled" });
++    await page.getByRole("link", { name: "Dependent Service", exact: true }).last().click();
++    await expect(page.getByTestId("monitor-status")).toContainText("Down");
++    await page.evaluate(() => {
++        document.body.classList.add("dark");
++    });
++    await page.setViewportSize({ width: 390, height: 844 });
++    await expect(page.locator("body")).toHaveClass(/mobile/);
++    await expect
++        .poll(async () => {
++            const bounds = await page.locator(".suppression-label").last().boundingBox();
++            return bounds && bounds.x >= 0 && bounds.x + bounds.width <= 390;
++        })
++        .toBe(true);
++    await screenshot(testInfo, page);
++    await page.screenshot({ path: testInfo.outputPath("dependency-mobile-dark.png"), animations: "disabled" });
++    await push(request, gateway.url, "up");
++    await expect(page.locator(".suppression-label")).toHaveCount(0);
++    await expect(page.getByTestId("monitor-status")).toContainText("Down");
++    await push(request, service.url, "down");
++    await expect(page.locator(".suppression-label")).toHaveCount(0);
++    await push(request, gateway.url, "down");
++    await push(request, service.url, "down");
++    await expect(page.locator(".suppression-label").last()).toBeVisible();
++    await page.context().setOffline(true);
++    await expect(page.locator(".suppression-label")).toHaveCount(0);
++    await page.context().setOffline(false);
++    await page.reload();
++    await expect(page.locator(".suppression-label")).toHaveCount(0);
++});
+diff --git a/test/e2e/specs/monitor-list-actions.spec.js b/test/e2e/specs/monitor-list-actions.spec.js
+index 2c37c1328ed7db8b4ab7aa74d06a6ff7a11225e4..9444cf1d6b9ad973e5a026f4ff4b91d28e1556f7 100644
+--- a/test/e2e/specs/monitor-list-actions.spec.js
++++ b/test/e2e/specs/monitor-list-actions.spec.js
+@@ -70,6 +70,7 @@ test.describe("Monitor list actions", () => {
+ 
+         await page.getByRole("link", { name: "Edit" }).click();
+         await page.waitForURL("/edit/*");
++        await expect(page.getByTestId("friendly-name-input")).toHaveValue("Old Name");
+         await page.getByTestId("friendly-name-input").fill("New Name");
+         await page.getByTestId("save-button").click();
+         await expect(page.locator(".Vue-Toastification__toast").first()).toContainText("Saved");
+@@ -85,6 +86,7 @@ test.describe("Monitor list actions", () => {
+ 
+         await page.getByRole("link", { name: "Clone" }).click();
+         await page.waitForURL("/clone/*");
++        await expect(page.getByTestId("friendly-name-input")).toHaveValue("Clone of Original Monitor");
+         await page.getByTestId("friendly-name-input").fill("Cloned Monitor");
+         await page.getByTestId("save-button").click();
+         await page.waitForURL(/\/dashboard\/\d+/);
+@@ -101,6 +103,7 @@ test.describe("Monitor list actions", () => {
+         await openDetails(page, "Group A");
+         await page.getByRole("link", { name: "Edit" }).click();
+         await page.waitForURL("/edit/*");
++        await expect(page.getByTestId("friendly-name-input")).toHaveValue("Group A");
+         await page.getByTestId("friendly-name-input").fill("Renamed Group");
+         await page.getByTestId("save-button").click();
+         await expect(page.locator(".Vue-Toastification__toast").first()).toContainText("Saved");
+diff --git a/test/frontend-test/test-monitor-dependency.ts b/test/frontend-test/test-monitor-dependency.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..456af89b29bf24e0b3b212cff17ef74933bdedb9
+--- /dev/null
++++ b/test/frontend-test/test-monitor-dependency.ts
+@@ -0,0 +1,129 @@
++import { describe, test } from "node:test";
++import assert from "node:assert/strict";
++import {
++    dependencyChain,
++    invalidateDependencyObservation,
++    invalidateDependencyHistory,
++    recordDependencyObservation,
++    type DependencyMonitor,
++    type SuppressionObservation,
++} from "../../src/monitor-dependency";
++
++/**
++ * Example: service -> proxy (paused) -> gateway, plus an unrelated monitor.
++ * @returns Monitor configuration
++ */
++function monitors(): Record<number, DependencyMonitor> {
++    return {
++        1: { id: 1, name: "Gateway", active: true, dependencyMonitorId: null },
++        2: { id: 2, name: "Proxy", active: false, dependencyMonitorId: 1 },
++        3: { id: 3, name: "Service", active: true, dependencyMonitorId: 2 },
++        4: { id: 4, name: "Other", active: true, dependencyMonitorId: null },
++    };
++}
++
++const suppressedBeat = {
++    monitorID: 3,
++    status: 0,
++    dependencyNotification: { suppressed: true, reason: "ancestor-down", suppressedByMonitorId: 1 },
++};
++
++describe("dependency selection", () => {
++    test("allows None, independent monitors and transitive ancestors including paused monitors", () => {
++        assert.deepEqual(dependencyChain(monitors(), null, 3), []);
++        assert.deepEqual(dependencyChain(monitors(), 4, 3), [4]);
++        assert.deepEqual(dependencyChain(monitors(), 2, 3), [2, 1]);
++    });
++    test("rejects self, descendants, existing cycles and missing configuration", () => {
++        assert.equal(dependencyChain(monitors(), 3, 3), null);
++        assert.equal(dependencyChain(monitors(), 3, 1), null);
++        const list = monitors();
++        list[1].dependencyMonitorId = 2;
++        assert.equal(dependencyChain(list, 2, 4), null);
++        assert.equal(dependencyChain(list, 99, 3), null);
++        delete list[1];
++        assert.equal(dependencyChain(list, 2, 3), null);
++    });
++});
++
++describe("live suppression observations", () => {
++    test("uses backend metadata without changing heartbeat status, supports transitive blockers", () => {
++        const observations: Record<number, SuppressionObservation> = {};
++        recordDependencyObservation(observations, monitors(), suppressedBeat);
++        assert.deepEqual(observations[3], { blockerId: 1, ancestors: [2, 1] });
++        assert.equal(suppressedBeat.status, 0);
++    });
++    test("never infers suppression from DOWN, unknown/retrying metadata, or history without metadata", () => {
++        for (const status of [0, 1, 2, 3]) {
++            const observations = {};
++            recordDependencyObservation(observations, monitors(), { monitorID: 3, status });
++            assert.deepEqual(observations, {});
++        }
++        const observations = {};
++        recordDependencyObservation(observations, monitors(), {
++            ...suppressedBeat,
++            dependencyNotification: { suppressed: false, reason: "ancestor-unconfirmed" },
++        });
++        assert.deepEqual(observations, {});
++    });
++    test("rejects inactive, missing, unrelated and recovered blockers, and non-DOWN children", () => {
++        for (const status of [1, 2, 3]) {
++            const observations = {};
++            recordDependencyObservation(observations, monitors(), { ...suppressedBeat, status });
++            assert.deepEqual(observations, {});
++            recordDependencyObservation(observations, monitors(), suppressedBeat, { 1: { status } });
++            assert.deepEqual(observations, {});
++        }
++        for (const blocker of [2, 4, 99]) {
++            const observations = {};
++            recordDependencyObservation(observations, monitors(), {
++                ...suppressedBeat,
++                dependencyNotification: { ...suppressedBeat.dependencyNotification, suppressedByMonitorId: blocker },
++            });
++            assert.deepEqual(observations, {});
++        }
++        const list = monitors();
++        list[3].active = false;
++        const observations = {};
++        recordDependencyObservation(observations, list, suppressedBeat);
++        assert.deepEqual(observations, {});
++    });
++    test("invalidates on child or ancestor beats but preserves observations on unrelated beats", () => {
++        for (const id of [1, 2, 3, 4]) {
++            const observations: Record<number, SuppressionObservation> = {};
++            recordDependencyObservation(observations, monitors(), suppressedBeat);
++            recordDependencyObservation(observations, monitors(), { monitorID: id, status: 1 });
++            assert.equal(Boolean(observations[3]), id === 4);
++        }
++    });
++    test("historical latest-beat replacements invalidate live claims without reestablishing them", () => {
++        const observations: Record<number, SuppressionObservation> = {};
++        recordDependencyObservation(observations, monitors(), suppressedBeat);
++        invalidateDependencyObservation(observations, 4);
++        assert.equal(observations[3].blockerId, 1);
++        invalidateDependencyObservation(observations, 1);
++        assert.deepEqual(observations, {});
++        recordDependencyObservation(observations, monitors(), suppressedBeat);
++        invalidateDependencyObservation(observations, 3);
++        assert.deepEqual(observations, {});
++    });
++    test("the same stored beat in history preserves confirmation, changed or unidentified beats invalidate it", () => {
++        const observations: Record<number, SuppressionObservation> = {};
++        recordDependencyObservation(observations, monitors(), suppressedBeat);
++        invalidateDependencyHistory(observations, 3, { id: 10, status: 0 }, { id: 10, status: 0 });
++        assert.equal(observations[3].blockerId, 1);
++        invalidateDependencyHistory(observations, 3, { id: 10, status: 0 }, { id: 11, status: 1 });
++        assert.deepEqual(observations, {});
++        recordDependencyObservation(observations, monitors(), suppressedBeat);
++        invalidateDependencyHistory(observations, 1, undefined, { status: 1 });
++        assert.deepEqual(observations, {});
++    });
++    test("a fresh backend decision reestablishes suppression after invalidation", () => {
++        const observations: Record<number, SuppressionObservation> = {};
++        recordDependencyObservation(observations, monitors(), suppressedBeat);
++        recordDependencyObservation(observations, monitors(), { monitorID: 1, status: 1 });
++        assert.deepEqual(observations, {});
++        recordDependencyObservation(observations, monitors(), suppressedBeat, { 1: { status: 0 } });
++        assert.equal(observations[3].blockerId, 1);
++    });
++});

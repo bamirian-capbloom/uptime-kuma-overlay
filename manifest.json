@@ -1,0 +1,45 @@
+{
+  "format_version": 1,
+  "upstream": {
+    "repository": "https://github.com/louislam/uptime-kuma.git",
+    "commit": "f6f6e6da26a29176ae0a2c928f507674eb593f66",
+    "tree": "80c5790adb545fa65dff1e899f14bb16116c755c"
+  },
+  "reference": {
+    "repository": "https://github.com/bamirian-capbloom/uptime-kuma.git",
+    "commit": "7162f0d0fac3bf51b31fdfcab4bc3f2f285958c6",
+    "tree": "be13476ed780b6bf0eb5b129023f504a226102b3",
+    "latest_upstream_observed": "b376409720f6df948707a3366398248d370bbf51",
+    "unrelated_fork_divergence": []
+  },
+  "default_features": [
+    "monitor-dependencies",
+    "toast-lifecycle"
+  ],
+  "features": [
+    {
+      "id": "monitor-dependencies",
+      "manifest": "features/monitor-dependencies/manifest.json",
+      "sha256": "d85019020da4930dc744a380fc8b3f78d400ad2921fbd6bfe9028bc24fe1acbe"
+    },
+    {
+      "id": "toast-lifecycle",
+      "manifest": "features/toast-lifecycle/manifest.json",
+      "sha256": "e0823cb50bfed28a60b51efeb0116bd15d782764405d10e8636bc2c57f47e26e"
+    }
+  ],
+  "intended": {
+    "tree": "e843c85f2cf45c151abb07fd27ae37fc9ea3d004",
+    "difference_from_reference": {
+      "reason": "Exclude derived dependencyActive dashboard fields from monitor add/import, fixing clone regression present in merged fork",
+      "files": [
+        "server/server.js",
+        "test/backend-test/test-monitor-dependency-socket.ts"
+      ],
+      "patch_unit": "0006a-clone-payload-safety"
+    },
+    "correction_units": [
+      "0006a-clone-payload-safety"
+    ]
+  }
+}
