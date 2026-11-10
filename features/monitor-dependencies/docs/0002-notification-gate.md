@@ -4,6 +4,8 @@
 
 Gates scheduled and push DOWN transitions/repeats across the complete ancestor chain. Active DOWN ancestors suppress; unknown/PENDING ancestors defer. Paused and maintenance ancestors do not block by themselves, but traversal continues. Silent incidents recover silently; previously announced incidents retain recovery. Deferred DOWN sends on the next child check after release. Certificate/domain alerts and real heartbeat statuses remain unchanged.
 
+For the operational distinction between a configured dependency, a current blocker and observed service availability, see [Understanding notification dependencies](understanding-dependencies.md).
+
 ## Modified files, functions and integration points
 
 Creates monitor_notification_state keyed by monitor_id (cascade delete), status, incident_open and deferred. processDependencyNotification serializes decisions per monitor and persists observations before sending; dependencyMetadata resolves ancestors. Monitor.beat and push /api/push/:pushToken use the gate; live private heartbeat payloads add dependencyNotification metadata. History schema is unchanged.

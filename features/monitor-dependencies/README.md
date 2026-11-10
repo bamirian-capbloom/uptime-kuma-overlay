@@ -4,6 +4,12 @@ Configures one dependency per monitor, gates status notifications, displays conf
 
 Known semantics: shared authenticated access, process-local coordination, observed check ordering, unknown ancestors can defer indefinitely, provider attempts rather than guaranteed receipt.
 
+## Interpreting dependencies
+
+A configured dependency controls failure notifications while each monitor retains its own observed health. An UP child and DOWN ancestor can reflect different check times, check coverage, failover or partial functionality; persistent disagreement in a strict dependency deserves investigation.
+
+Read [Understanding notification dependencies](docs/understanding-dependencies.md) for practical examples, the distinction between a configured dependency and its current blocker, and guidance on choosing checks.
+
 ## Units and documentation
 
 - [0001-configuration](docs/0001-configuration.md)
