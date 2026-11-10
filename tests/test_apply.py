@@ -32,7 +32,8 @@ class ReplaySafety(unittest.TestCase):
         (self.source / 'file.txt').write_text('custom\n')
         self.run_git('add', '.')
         after = self.run_git('write-tree')
-        patch = subprocess.check_output(['git', '-C', str(self.source), 'diff', '--cached', '--binary', '--full-index'])
+        patch = subprocess.check_output(['git', '-C', str(self.source), 'diff', '--cached', '--binary', '--full-index'],
+                                        env=self.fixture_environment())
         # Leave the source dirty to prove source working state is not touched/copied.
         (self.source / 'file.txt').write_text('private uncommitted content\n')
         self.bundle = self.root / 'bundle'
@@ -52,8 +53,13 @@ class ReplaySafety(unittest.TestCase):
         self.addCleanup(setattr, overlay, 'ROOT', previous)
         self.dest = self.root / 'output'
 
+    def fixture_environment(self):
+        # Tests must not redirect their own setup into the caller's repository.
+        return {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
+
     def run_git(self, *args):
-        return subprocess.check_output(['git', '-C', str(self.source), *args]).decode().strip()
+        return subprocess.check_output(['git', '-C', str(self.source), *args],
+                                       env=self.fixture_environment()).decode().strip()
 
     def save(self):
         data = json.dumps(self.module).encode()
