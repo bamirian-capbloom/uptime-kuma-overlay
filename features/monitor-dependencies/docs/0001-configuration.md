@@ -4,6 +4,8 @@
 
 Adds one optional direct dependency per monitor. Validates positive integer IDs, existence and cycles; serializes saves and deletions within the server process. Missing fields preserve an existing dependency on edit and default to null on creation; explicit null clears it. Raw DB aliases cannot bypass validation.
 
+For help choosing meaningful relationships and interpreting apparently contradictory health, see [Understanding notification dependencies](understanding-dependencies.md).
+
 ## Modified files, functions and integration points
 
 Adds nullable indexed monitor.dependency_monitor_id with a self foreign key (ON DELETE SET NULL, ON UPDATE CASCADE). Authenticated monitor JSON and compact lists expose dependencyMonitorId. Socket add/edit and deletion paths use saveMonitorWithDependency, validateMonitorDependency and withMonitorDependencyLock. No public dependency configuration endpoint is introduced.
